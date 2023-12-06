@@ -43,17 +43,17 @@ app.get("/check", (req, res) => {
     res.sendStatus(200);
 });
 // Declare The PORT
-const PORT = process.env.PORT || 8000;
+const PORT = process.env.PORT || 8001;
 app.get("/", (req, res) => {
-    res.send("Hello Express");
+    res.send("Welcome to Old Man Hockey League");
 });
 // Listen for the server on PORT
 app.listen(PORT, () => __awaiter(void 0, void 0, void 0, function* () {
     console.log(`🗄️ Server Fire on http://localhost:${PORT}`);
     // Connect to Database
     try {
-        const databaseURL = process.env.DATABASE_URL || "mongodb://localhost:27017/Web";
-        yield mongoose_1.default.connect(databaseURL);
+        const DATABASE_URL = process.env.MONGODB_URI || "mongodb://localhost:27017/Web";
+        yield mongoose_1.default.connect(DATABASE_URL);
         console.log("🛢️ Connected To Database");
     }
     catch (error) {

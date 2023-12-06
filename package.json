@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc",
     "heroku-postbuild": "tsc",
-    "start": "node dist/app.js",
+    "start": "npm run build && node dist/app.js",
     "dev": "nodemon --exec ts-node app.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
