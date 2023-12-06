@@ -39,9 +39,9 @@ app.get("/check", (req: Request, res: Response) => {
 });
 
 // Declare The PORT
-const PORT = process.env.PORT || 8000;
+const PORT = process.env.PORT || 8001;
 app.get("/", (req: Request, res: Response) => {
-  res.send("Hello Express");
+  res.send("Welcome to Old Man Hockey League");
 });
 
 // Listen for the server on PORT
