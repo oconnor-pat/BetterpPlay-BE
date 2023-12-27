@@ -101,11 +101,16 @@ app.post("/auth/register", async (req: Request, res: Response) => {
       password: hashedPassword,
     });
 
+    // Determine where to direct the user after registration
+    const redirectPage =
+      emailAlreadyExists || usernameAlreadyExists ? "Roster" : "Profile";
+
     return res.status(201).json({
       status: 201,
       success: true,
       message: "User created successfully",
       user: newUser,
+      redirectPage,
     });
   } catch (error) {
     console.error("Error while registering user:", error);
