@@ -159,3 +159,29 @@ app.post("/auth/login", async (req: Request, res: Response) => {
     });
   }
 });
+
+// User API to get user data by ID
+app.get("/users/:id", async (req: Request, res: Response) => {
+  try {
+    const user = await User.findById(req.params.id).select("-password");
+
+    if (!user) {
+      return res.status(404).json({
+        status: 404,
+        message: "User not found",
+      });
+    }
+
+    return res.status(200).json({
+      status: 200,
+      success: true,
+      user,
+    });
+  } catch (error) {
+    console.error("Error fetching user data:", error);
+    return res.status(500).json({
+      status: 500,
+      message: "Failed to fetch user data",
+    });
+  }
+});
