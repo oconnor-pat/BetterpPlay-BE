@@ -13,7 +13,6 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = __importDefault(require("express"));
-const cors_1 = __importDefault(require("cors"));
 const mongoose_1 = __importDefault(require("mongoose"));
 const user_1 = require("./models/user");
 const bcrypt_1 = __importDefault(require("bcrypt"));
@@ -21,17 +20,6 @@ const dotenv_1 = __importDefault(require("dotenv"));
 const app = (0, express_1.default)();
 // Configure env
 dotenv_1.default.config();
-const corsOptions = {
-    origin: [
-        "http://localhost:3000",
-        "https://bew-app-b16d4a15e37d.herokuapp.com",
-    ],
-    methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
-    credentials: true,
-    optionsSuccessStatus: 204,
-    allowedHeaders: ["Content-Type", "Authorization"],
-};
-app.use((0, cors_1.default)(corsOptions));
 // Parser
 app.use(express_1.default.json());
 app.use(express_1.default.urlencoded({
@@ -52,7 +40,7 @@ app.listen(PORT, () => __awaiter(void 0, void 0, void 0, function* () {
     console.log(`🗄️ Server Fire on http://localhost:${PORT}`);
     // Connect to Database
     try {
-        const DATABASE_URL = process.env.MONGODB_URI || "mongodb://localhost:27017/Web";
+        const DATABASE_URL = process.env.MONGODB_URI || "mongodb://localhost:27017/OMHL";
         yield mongoose_1.default.connect(DATABASE_URL);
         console.log("🛢️ Connected To Database");
     }
@@ -94,11 +82,14 @@ app.post("/auth/register", (req, res) => __awaiter(void 0, void 0, void 0, funct
             username,
             password: hashedPassword,
         });
+        // Determine where to direct the user after registration
+        const redirectPage = emailAlreadyExists || usernameAlreadyExists ? "Roster" : "Profile";
         return res.status(201).json({
             status: 201,
             success: true,
             message: "User created successfully",
             user: newUser,
+            redirectPage,
         });
     }
     catch (error) {
@@ -140,6 +131,30 @@ app.post("/auth/login", (req, res) => __awaiter(void 0, void 0, void 0, function
         return res.status(500).json({
             status: 500,
             message: "Failed to process the login request",
+        });
+    }
+}));
+// User API to get user data by ID
+app.get("/users/:id", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const user = yield user_1.User.findById(req.params.id).select("-password");
+        if (!user) {
+            return res.status(404).json({
+                status: 404,
+                message: "User not found",
+            });
+        }
+        return res.status(200).json({
+            status: 200,
+            success: true,
+            user,
+        });
+    }
+    catch (error) {
+        console.error("Error fetching user data:", error);
+        return res.status(500).json({
+            status: 500,
+            message: "Failed to fetch user data",
         });
     }
 }));
