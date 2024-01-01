@@ -1,5 +1,4 @@
 import express from "express";
-import cors from "cors";
 import { Application, Request, Response } from "express";
 import mongoose from "mongoose";
 import { User } from "./models/user";
@@ -10,19 +9,6 @@ const app: Application = express();
 
 // Configure env
 dotenv.config();
-
-const corsOptions = {
-  origin: [
-    "http://localhost:3000",
-    "https://bew-app-b16d4a15e37d.herokuapp.com",
-  ],
-  methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
-  credentials: true,
-  optionsSuccessStatus: 204,
-  allowedHeaders: ["Content-Type", "Authorization"],
-};
-
-app.use(cors(corsOptions));
 
 // Parser
 app.use(express.json());
@@ -51,7 +37,7 @@ app.listen(PORT, async () => {
   // Connect to Database
   try {
     const DATABASE_URL =
-      process.env.MONGODB_URI || "mongodb://localhost:27017/Web";
+      process.env.MONGODB_URI || "mongodb://localhost:27017/OMHL";
     await mongoose.connect(DATABASE_URL);
     console.log("🛢️ Connected To Database");
   } catch (error) {
