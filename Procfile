@@ -1,1 +1,1 @@
-omhl-be: npm run build && node dist/app.js
+web: npm run build && node dist/app.js
