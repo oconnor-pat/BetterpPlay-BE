@@ -27,7 +27,7 @@ app.get("/check", (req: Request, res: Response) => {
 // Declare The PORT
 const PORT = process.env.PORT || 8001;
 app.get("/", (req: Request, res: Response) => {
-  res.send("Welcome to Old Man Hockey League");
+  res.send("Welcome to a better way to play!");
 });
 
 // Listen for the server on PORT
