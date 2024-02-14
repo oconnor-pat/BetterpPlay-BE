@@ -1,14 +1,22 @@
-import express from "express";
-import { Application, Request, Response } from "express";
+import express, { Application, Request, Response } from "express";
 import mongoose from "mongoose";
 import { User } from "./models/user";
 import bcrypt from "bcrypt";
 import dotenv from "dotenv";
+import jwt from "jsonwebtoken";
 
 const app: Application = express();
 
 // Configure env
 dotenv.config();
+
+// Check if JWT_SECRET is set
+if (!process.env.JWT_SECRET) {
+  console.error("JWT_SECRET is not set. Check your environment variables.");
+  process.exit(1);
+}
+
+const JWT_SECRET = process.env.JWT_SECRET;
 
 // Parser
 app.use(express.json());
@@ -17,6 +25,20 @@ app.use(
     extended: true,
   })
 );
+
+// JWT middleware
+app.use(async (req: Request, res: Response, next: Function) => {
+  if (req.headers.authorization) {
+    const token = req.headers.authorization.split(" ")[1];
+    try {
+      const user = jwt.verify(token, JWT_SECRET);
+      (req as any).user = user;
+    } catch (error) {
+      console.error("Error verifying token:", error);
+    }
+  }
+  next();
+});
 
 // Check server availability
 app.get("/check", (req: Request, res: Response) => {
@@ -87,6 +109,11 @@ app.post("/auth/register", async (req: Request, res: Response) => {
       password: hashedPassword,
     });
 
+    const token = jwt.sign(
+      { id: newUser._id },
+      process.env.JWT_SECRET || "your-secret-key"
+    );
+
     // Determine where to direct the user after registration
     const redirectPage =
       emailAlreadyExists || usernameAlreadyExists ? "Roster" : "Profile";
@@ -96,6 +123,7 @@ app.post("/auth/register", async (req: Request, res: Response) => {
       success: true,
       message: "User created successfully",
       user: newUser,
+      token,
       redirectPage,
     });
   } catch (error) {
@@ -131,11 +159,17 @@ app.post("/auth/login", async (req: Request, res: Response) => {
       });
     }
 
+    const token = jwt.sign(
+      { id: user._id },
+      process.env.JWT_SECRET || "your-secret-key"
+    );
+
     return res.status(200).json({
       status: 200,
       success: true,
       message: "Login successful",
       user,
+      token,
     });
   } catch (error) {
     console.error("Error logging in:", error);
@@ -146,6 +180,7 @@ app.post("/auth/login", async (req: Request, res: Response) => {
   }
 });
 
+// User API to get all users
 app.get("/users", async (req: Request, res: Response) => {
   try {
     const users = await User.find().select("-password");
