@@ -1,6 +1,7 @@
 {
   "name": "@better-play/be",
   "version": "1.0.0",
+  "type": "commonjs",
   "description": "",
   "engines": {
     "node": "20.9.0",
