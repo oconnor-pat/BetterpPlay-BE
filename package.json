@@ -1,7 +1,6 @@
 {
   "name": "BetterPlay-BE",
   "version": "1.0.0",
-  "type": "module",
   "description": "",
   "engines": {
     "node": "20.9.0",
