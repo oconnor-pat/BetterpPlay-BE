@@ -109,7 +109,9 @@ app.post("/auth/register", async (req: Request, res: Response) => {
       password: hashedPassword,
     });
 
-    const token = jwt.sign({ id: newUser._id }, JWT_SECRET);
+    const token = jwt.sign({ id: newUser._id }, JWT_SECRET, {
+      expiresIn: "1h",
+    });
 
     // Determine where to direct the user after registration
     const redirectPage =
@@ -156,7 +158,7 @@ app.post("/auth/login", async (req: Request, res: Response) => {
       });
     }
 
-    const token = jwt.sign({ id: user._id }, JWT_SECRET);
+    const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: "1h" });
 
     return res.status(200).json({
       status: 200,
