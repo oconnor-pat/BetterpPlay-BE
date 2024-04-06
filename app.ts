@@ -195,7 +195,7 @@ app.get("/users", async (req: Request, res: Response) => {
 });
 
 // User API to get user data
-app.get("/user/:id", async (req: Request, res: Response) => {
+app.get("/users/:id", async (req: Request, res: Response) => {
   try {
     const user = await User.findById(req.params.id).select("-password");
 
