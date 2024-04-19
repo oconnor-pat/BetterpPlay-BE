@@ -4,6 +4,11 @@ import { User } from "./models/user";
 import bcrypt from "bcrypt";
 import dotenv from "dotenv";
 import jwt from "jsonwebtoken";
+import multer from "multer";
+import AWS from "aws-sdk";
+
+//aws s3 instance
+const s3 = new AWS.S3();
 
 const app: Application = express();
 
@@ -216,6 +221,50 @@ app.get("/user/:id", async (req: Request, res: Response) => {
     return res.status(500).json({
       status: 500,
       message: "Failed to fetch user data",
+    });
+  }
+});
+
+// User API to update user data
+// Configure multer storage
+const storage = multer.diskStorage({
+  destination: function(
+    req: Request,
+    file: Express.Multer.File,
+    cb: (error: Error | null, destination: string) => void
+  ) {
+    cb(null, "./uploads/"); // Destination folder
+  },
+  filename: function(
+    req: Request,
+    file: Express.Multer.File,
+    cb: (error: Error | null, filename: string) => void
+  ) {
+    cb(null, new Date().toISOString().replace(/:/g, "-") + file.originalname); // Filename
+  },
+});
+
+// Configure multer to store files in memory
+const upload = multer({ storage: multer.memoryStorage() });
+
+// Upload file to S3
+app.post("/upload", upload.single("image"), (req: Request, res: Response) => {
+  if (req.file) {
+    const params = {
+      Bucket: "betterplay",
+      Key: `${Date.now()}-${req.file.originalname}`, // Filename you want to save as in S3
+      Body: req.file.buffer,
+    };
+
+    // Uploading files to the bucket
+    s3.upload(params, function(
+      err: Error,
+      data: AWS.S3.ManagedUpload.SendData
+    ) {
+      if (err as AWS.AWSError) {
+        res.status(500).json({ error: "Error -> " + err });
+      }
+      res.send("File uploaded successfully! -> keyname = " + data.Key);
     });
   }
 });
