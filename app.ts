@@ -1,7 +1,7 @@
 import express, { Application, Request, Response } from "express";
 import mongoose from "mongoose";
-import { User } from "./models/user";
 import bcrypt from "bcrypt";
+import User, { IUser } from "./models/user";
 import dotenv from "dotenv";
 import jwt from "jsonwebtoken";
 import multer from "multer";
@@ -257,14 +257,21 @@ app.post("/upload", upload.single("image"), (req: Request, res: Response) => {
     };
 
     // Uploading files to the bucket
-    s3.upload(params, function(
+    s3.upload(params, async function(
       err: Error,
       data: AWS.S3.ManagedUpload.SendData
     ) {
       if (err as AWS.AWSError) {
         res.status(500).json({ error: "Error -> " + err });
+      } else {
+        // Update the user's profile picture URL in the database
+        const user = (await User.findById((req as any).user.id)) as IUser;
+        if (user) {
+          user.profilePicUrl = data.Location;
+          await user.save();
+        }
+        res.send("File uploaded successfully! -> keyname = " + data.Key);
       }
-      res.send("File uploaded successfully! -> keyname = " + data.Key);
-    });
+    }); // Add closing parenthesis and semicolon here
   }
 });
