@@ -6,6 +6,7 @@ import dotenv from "dotenv";
 import jwt from "jsonwebtoken";
 import multer from "multer";
 import AWS from "aws-sdk";
+import user from "./models/user";
 
 //aws s3 instance
 const s3 = new AWS.S3();
@@ -252,7 +253,7 @@ app.post("/upload", upload.single("image"), (req: Request, res: Response) => {
   if (req.file) {
     const params = {
       Bucket: "betterplay",
-      Key: `${Date.now()}-${req.file.originalname}`, // Filename for S3
+      Key: `${Date.now()}-${req.file.originalname}`,
       Body: req.file.buffer,
     };
 
