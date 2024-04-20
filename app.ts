@@ -202,7 +202,7 @@ app.get("/users", async (req: Request, res: Response) => {
 // User API to get user data
 app.get("/user/:id", async (req: Request, res: Response) => {
   try {
-    const user = await User.findById(req.params.id).select("-password");
+    const users = await User.find();
 
     if (!user) {
       return res.status(404).json({
@@ -252,7 +252,7 @@ app.post("/upload", upload.single("image"), (req: Request, res: Response) => {
   if (req.file) {
     const params = {
       Bucket: "betterplay",
-      Key: `${Date.now()}-${req.file.originalname}`, // Filename you want to save as in S3
+      Key: `${Date.now()}-${req.file.originalname}`, // Filename for S3
       Body: req.file.buffer,
     };
 
@@ -272,6 +272,6 @@ app.post("/upload", upload.single("image"), (req: Request, res: Response) => {
         }
         res.send("File uploaded successfully! -> keyname = " + data.Key);
       }
-    }); // Add closing parenthesis and semicolon here
+    });
   }
 });
