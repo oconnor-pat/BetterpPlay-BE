@@ -1,4 +1,3 @@
-// user.ts
 import mongoose, { Document, Schema } from "mongoose";
 
 export interface IUser extends Document {
@@ -15,7 +14,7 @@ const UserSchema: Schema = new Schema(
     email: { type: String, required: true },
     username: { type: String, required: true },
     password: { type: String, required: true },
-    profilePicUrl: { type: String },
+    profilePicUrl: { type: String }, // URL of the user's profile picture stored in S3
   },
   { timestamps: true }
 );
