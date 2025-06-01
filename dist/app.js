@@ -16,9 +16,13 @@ const express_1 = __importDefault(require("express"));
 const mongoose_1 = __importDefault(require("mongoose"));
 const bcrypt_1 = __importDefault(require("bcrypt"));
 const user_1 = __importDefault(require("./models/user"));
+const event_1 = __importDefault(require("./models/event"));
 const dotenv_1 = __importDefault(require("dotenv"));
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
+const cors_1 = __importDefault(require("cors"));
 const app = (0, express_1.default)();
+// Enable CORS for all origins (development)
+app.use((0, cors_1.default)());
 // Configure env
 dotenv_1.default.config();
 // Check if JWT_SECRET is set
@@ -51,25 +55,10 @@ app.get("/check", (req, res) => {
     // Return a 200 status if the server is available
     res.sendStatus(200);
 });
-// Declare The PORT
-const PORT = process.env.PORT || 8001;
+// Basic welcome route
 app.get("/", (req, res) => {
     res.send("Welcome to a better way to play!");
 });
-// Listen for the server on PORT
-app.listen(PORT, () => __awaiter(void 0, void 0, void 0, function* () {
-    console.log(`🗄️ Server Fire on http://localhost:${PORT}`);
-    // Connect to Database
-    try {
-        const DATABASE_URL = process.env.MONGODB_URI || "mongodb://localhost:27017/OMHL";
-        yield mongoose_1.default.connect(DATABASE_URL);
-        console.log("🛢️ Connected To Database");
-    }
-    catch (error) {
-        console.log("⚠️ Error connecting to the database:", error);
-        process.exit(1); // Exit the process
-    }
-}));
 // User API to register account
 app.post("/auth/register", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
@@ -169,5 +158,42 @@ app.put("/user/profile-pic", (req, res) => __awaiter(void 0, void 0, void 0, fun
     }
     catch (error) {
         return res.status(500).json({ error: "Failed to update profile picture" });
+    }
+}));
+// New endpoint to update an event's roster
+app.put("/events/:id/roster", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    const eventId = req.params.id;
+    const { roster } = req.body;
+    try {
+        const event = yield event_1.default.findById(eventId);
+        if (!event) {
+            return res.status(404).json({ message: "Event not found" });
+        }
+        // Update the event's roster. Make sure your Event schema defines a "roster" field.
+        event.roster = roster;
+        yield event.save();
+        return res.status(200).json({ success: true, roster: event.roster });
+    }
+    catch (error) {
+        console.error("Error updating event roster:", error);
+        return res.status(500).json({ message: "Error updating event roster" });
+    }
+}));
+// Declare The PORT
+const PORT = process.env.PORT || 8001;
+app.get("/", (req, res) => {
+    res.send("Welcome to a better way to play!");
+});
+app.listen(PORT, () => __awaiter(void 0, void 0, void 0, function* () {
+    console.log(`🗄️ Server Fire on http://localhost:${PORT}`);
+    // Connect to Database
+    try {
+        const DATABASE_URL = process.env.MONGODB_URI || "mongodb://localhost:27017/OMHL";
+        yield mongoose_1.default.connect(DATABASE_URL);
+        console.log("🛢️ Connected To Database");
+    }
+    catch (error) {
+        console.log("⚠️ Error connecting to the database:", error);
+        process.exit(1); // Exit the process
     }
 }));
