@@ -17,14 +17,22 @@ const mongoose_1 = __importDefault(require("mongoose"));
 const bcrypt_1 = __importDefault(require("bcrypt"));
 const user_1 = __importDefault(require("./models/user"));
 const event_1 = __importDefault(require("./models/event"));
+const communityNote_1 = __importDefault(require("./models/communityNote"));
 const dotenv_1 = __importDefault(require("dotenv"));
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 const cors_1 = __importDefault(require("cors"));
+const aws_sdk_1 = __importDefault(require("aws-sdk"));
 const app = (0, express_1.default)();
 // Enable CORS for all origins (development)
 app.use((0, cors_1.default)());
 // Configure env
 dotenv_1.default.config();
+// S3 client setup
+const s3 = new aws_sdk_1.default.S3({
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+    region: process.env.AWS_REGION,
+});
 // Check if JWT_SECRET is set
 if (!process.env.JWT_SECRET) {
     console.error("JWT_SECRET is not set. Check your environment variables.");
@@ -178,6 +186,48 @@ app.put("/events/:id/roster", (req, res) => __awaiter(void 0, void 0, void 0, fu
         console.error("Error updating event roster:", error);
         return res.status(500).json({ message: "Error updating event roster" });
     }
+}));
+// Get all posts
+app.get("/community-notes", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    const notes = yield communityNote_1.default.find();
+    res.json(notes);
+}));
+// Create a post
+app.post("/community-notes", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    const { text, userId, username } = req.body;
+    const note = yield communityNote_1.default.create({
+        text,
+        userId,
+        username,
+        comments: [],
+    });
+    res.status(201).json(note);
+}));
+// Add a comment
+app.post("/community-notes/:id/comments", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    const { text, userId, username } = req.body;
+    const note = yield communityNote_1.default.findById(req.params.id);
+    if (!note) {
+        return res.status(404).json({ message: "Post not found" });
+    }
+    note.comments.push({ text, userId, username });
+    yield note.save();
+    res.status(201).json(note);
+}));
+// Delete a post
+app.delete("/community-notes/:id", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    yield communityNote_1.default.findByIdAndDelete(req.params.id);
+    res.sendStatus(204);
+}));
+// Delete a comment
+app.delete("/community-notes/:postId/comments/:commentId", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    const note = yield communityNote_1.default.findById(req.params.postId);
+    if (!note) {
+        return res.status(404).json({ message: "Post not found" });
+    }
+    note.comments.pull({ _id: req.params.commentId });
+    yield note.save();
+    res.sendStatus(204);
 }));
 // Declare The PORT
 const PORT = process.env.PORT || 8001;

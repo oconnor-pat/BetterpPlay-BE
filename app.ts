@@ -3,9 +3,11 @@ import mongoose from "mongoose";
 import bcrypt from "bcrypt";
 import User, { IUser } from "./models/user";
 import Event from "./models/event";
+import communityNote from "./models/communityNote";
 import dotenv from "dotenv";
 import jwt from "jsonwebtoken";
 import cors from "cors";
+import AWS from "aws-sdk";
 
 const app: Application = express();
 
@@ -14,6 +16,13 @@ app.use(cors());
 
 // Configure env
 dotenv.config();
+
+// S3 client setup
+const s3 = new AWS.S3({
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  region: process.env.AWS_REGION,
+});
 
 // Check if JWT_SECRET is set
 if (!process.env.JWT_SECRET) {
@@ -186,6 +195,53 @@ app.put("/events/:id/roster", async (req: Request, res: Response) => {
     console.error("Error updating event roster:", error);
     return res.status(500).json({ message: "Error updating event roster" });
   }
+});
+
+// Get all posts
+app.get("/community-notes", async (req, res) => {
+  const notes = await communityNote.find();
+  res.json(notes);
+});
+
+// Create a post
+app.post("/community-notes", async (req, res) => {
+  const { text, userId, username } = req.body;
+  const note = await communityNote.create({
+    text,
+    userId,
+    username,
+    comments: [],
+  });
+  res.status(201).json(note);
+});
+
+// Add a comment
+app.post("/community-notes/:id/comments", async (req, res) => {
+  const { text, userId, username } = req.body;
+  const note = await communityNote.findById(req.params.id);
+  if (!note) {
+    return res.status(404).json({ message: "Post not found" });
+  }
+  note.comments.push({ text, userId, username });
+  await note.save();
+  res.status(201).json(note);
+});
+
+// Delete a post
+app.delete("/community-notes/:id", async (req, res) => {
+  await communityNote.findByIdAndDelete(req.params.id);
+  res.sendStatus(204);
+});
+
+// Delete a comment
+app.delete("/community-notes/:postId/comments/:commentId", async (req, res) => {
+  const note = await communityNote.findById(req.params.postId);
+  if (!note) {
+    return res.status(404).json({ message: "Post not found" });
+  }
+  note.comments.pull({ _id: req.params.commentId });
+  await note.save();
+  res.sendStatus(204);
 });
 
 // Declare The PORT
