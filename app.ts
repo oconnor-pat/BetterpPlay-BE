@@ -316,7 +316,7 @@ app.put(
   }
 );
 
-// Delete a reply from a comment
+// Delete a reply from a comment (FIXED)
 app.delete(
   "/community-notes/:postId/comments/:commentId/replies/:replyId",
   async (req, res) => {
@@ -329,7 +329,14 @@ app.delete(
     if (!comment) {
       return res.status(404).json({ message: "Comment not found" });
     }
-    comment.replies.id(replyId).remove();
+    // Find the index of the reply to remove
+    const replyIndex = comment.replies.findIndex(
+      (reply: any) => reply._id.toString() === replyId
+    );
+    if (replyIndex === -1) {
+      return res.status(404).json({ message: "Reply not found" });
+    }
+    comment.replies.splice(replyIndex, 1);
     await note.save();
     res.status(200).json({ replies: comment.replies });
   }

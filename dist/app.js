@@ -291,7 +291,7 @@ app.put("/community-notes/:postId/comments/:commentId/replies/:replyId", (req, r
     yield note.save();
     res.json({ text: reply.text });
 }));
-// Delete a reply from a comment
+// Delete a reply from a comment (FIXED)
 app.delete("/community-notes/:postId/comments/:commentId/replies/:replyId", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     const { postId, commentId, replyId } = req.params;
     const note = yield communityNote_1.default.findById(postId);
@@ -302,7 +302,12 @@ app.delete("/community-notes/:postId/comments/:commentId/replies/:replyId", (req
     if (!comment) {
         return res.status(404).json({ message: "Comment not found" });
     }
-    comment.replies.id(replyId).remove();
+    // Find the index of the reply to remove
+    const replyIndex = comment.replies.findIndex((reply) => reply._id.toString() === replyId);
+    if (replyIndex === -1) {
+        return res.status(404).json({ message: "Reply not found" });
+    }
+    comment.replies.splice(replyIndex, 1);
     yield note.save();
     res.status(200).json({ replies: comment.replies });
 }));
