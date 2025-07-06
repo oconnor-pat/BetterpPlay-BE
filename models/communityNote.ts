@@ -1,18 +1,34 @@
-import mongoose from "mongoose";
+// models/communityNote.js or .ts
+const mongoose = require("mongoose");
+const { Schema } = mongoose;
 
-const commentSchema = new mongoose.Schema({
-  text: String,
-  username: String,
-  userId: String,
-  createdAt: { type: Date, default: Date.now },
-});
+const ReplySchema = new Schema(
+  {
+    text: String,
+    username: String,
+    userId: String,
+  },
+  { timestamps: true }
+);
 
-const postSchema = new mongoose.Schema({
-  text: String,
-  userId: String,
-  username: String,
-  comments: [commentSchema],
-  createdAt: { type: Date, default: Date.now },
-});
+const CommentSchema = new Schema(
+  {
+    text: String,
+    username: String,
+    userId: String,
+    replies: [ReplySchema],
+  },
+  { timestamps: true }
+);
 
-export default mongoose.model("CommunityNote", postSchema);
+const CommunityNoteSchema = new Schema(
+  {
+    text: String,
+    userId: String,
+    username: String,
+    comments: [CommentSchema],
+  },
+  { timestamps: true }
+);
+
+export default mongoose.model("CommunityNote", CommunityNoteSchema);

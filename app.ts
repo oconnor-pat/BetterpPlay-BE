@@ -215,6 +215,18 @@ app.post("/community-notes", async (req, res) => {
   res.status(201).json(note);
 });
 
+// Edit a post
+app.put("/community-notes/:id", async (req, res) => {
+  const { text } = req.body;
+  const note = await communityNote.findById(req.params.id);
+  if (!note) {
+    return res.status(404).json({ message: "Post not found" });
+  }
+  note.text = text;
+  await note.save();
+  res.json({ text: note.text });
+});
+
 // Add a comment
 app.post("/community-notes/:id/comments", async (req, res) => {
   const { text, userId, username } = req.body;
@@ -224,7 +236,23 @@ app.post("/community-notes/:id/comments", async (req, res) => {
   }
   note.comments.push({ text, userId, username });
   await note.save();
-  res.status(201).json(note);
+  res.status(201).json({ comments: note.comments });
+});
+
+// Edit a comment
+app.put("/community-notes/:postId/comments/:commentId", async (req, res) => {
+  const { text } = req.body;
+  const note = await communityNote.findById(req.params.postId);
+  if (!note) {
+    return res.status(404).json({ message: "Post not found" });
+  }
+  const comment = note.comments.id(req.params.commentId);
+  if (!comment) {
+    return res.status(404).json({ message: "Comment not found" });
+  }
+  comment.text = text;
+  await note.save();
+  res.json({ text: comment.text });
 });
 
 // Delete a post
@@ -241,8 +269,71 @@ app.delete("/community-notes/:postId/comments/:commentId", async (req, res) => {
   }
   note.comments.pull({ _id: req.params.commentId });
   await note.save();
-  res.sendStatus(204);
+  res.status(200).json({ comments: note.comments });
 });
+
+// Add a reply to a comment
+app.post(
+  "/community-notes/:postId/comments/:commentId/replies",
+  async (req, res) => {
+    const { text, userId, username } = req.body;
+    const { postId, commentId } = req.params;
+    const note = await communityNote.findById(postId);
+    if (!note) {
+      return res.status(404).json({ message: "Post not found" });
+    }
+    const comment = note.comments.id(commentId);
+    if (!comment) {
+      return res.status(404).json({ message: "Comment not found" });
+    }
+    comment.replies.push({ text, userId, username });
+    await note.save();
+    res.status(201).json({ replies: comment.replies });
+  }
+);
+
+// Edit a reply
+app.put(
+  "/community-notes/:postId/comments/:commentId/replies/:replyId",
+  async (req, res) => {
+    const { text } = req.body;
+    const { postId, commentId, replyId } = req.params;
+    const note = await communityNote.findById(postId);
+    if (!note) {
+      return res.status(404).json({ message: "Post not found" });
+    }
+    const comment = note.comments.id(commentId);
+    if (!comment) {
+      return res.status(404).json({ message: "Comment not found" });
+    }
+    const reply = comment.replies.id(replyId);
+    if (!reply) {
+      return res.status(404).json({ message: "Reply not found" });
+    }
+    reply.text = text;
+    await note.save();
+    res.json({ text: reply.text });
+  }
+);
+
+// Delete a reply from a comment
+app.delete(
+  "/community-notes/:postId/comments/:commentId/replies/:replyId",
+  async (req, res) => {
+    const { postId, commentId, replyId } = req.params;
+    const note = await communityNote.findById(postId);
+    if (!note) {
+      return res.status(404).json({ message: "Post not found" });
+    }
+    const comment = note.comments.id(commentId);
+    if (!comment) {
+      return res.status(404).json({ message: "Comment not found" });
+    }
+    comment.replies.id(replyId).remove();
+    await note.save();
+    res.status(200).json({ replies: comment.replies });
+  }
+);
 
 // Declare The PORT
 const PORT = process.env.PORT || 8001;
