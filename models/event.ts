@@ -14,7 +14,7 @@ const PlayerSchema: Schema = new Schema(
     jerseyColor: { type: String, required: true },
     position: { type: String, required: true },
   },
-  { _id: false } // optionally disable _id for subdocuments if not needed
+  { _id: false }
 );
 
 export interface IEvent extends Document {
@@ -26,6 +26,7 @@ export interface IEvent extends Document {
   rosterSpotsFilled: number;
   eventType: string;
   createdBy: string;
+  createdByUsername?: string; // <-- Added field
   roster: IPlayer[];
 }
 
@@ -39,6 +40,7 @@ const EventSchema: Schema = new Schema(
     rosterSpotsFilled: { type: Number, default: 0 },
     eventType: { type: String, required: true },
     createdBy: { type: String, required: true },
+    createdByUsername: { type: String }, // <-- Added field
     roster: { type: [PlayerSchema], default: [] },
   },
   { timestamps: true }

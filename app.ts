@@ -56,7 +56,6 @@ app.use(async (req: Request, res: Response, next: Function) => {
 
 // Check server availability
 app.get("/check", (req: Request, res: Response) => {
-  // Return a 200 status if the server is available
   res.sendStatus(200);
 });
 
@@ -65,13 +64,224 @@ app.get("/", (req: Request, res: Response) => {
   res.send("Welcome to a better way to play!");
 });
 
+// ==================== EVENT ENDPOINTS ====================
+
+// Get all events (include roster)
+app.get("/events", async (req: Request, res: Response) => {
+  try {
+    const events = await Event.find();
+    res.status(200).json(events);
+  } catch (error) {
+    res.status(500).json({ message: "Failed to fetch events" });
+  }
+});
+
+// Get a single event (include roster)
+app.get("/events/:id", async (req: Request, res: Response) => {
+  try {
+    const event = await Event.findById(req.params.id);
+    if (!event) {
+      return res.status(404).json({ message: "Event not found" });
+    }
+    res.status(200).json(event);
+  } catch (error) {
+    res.status(500).json({ message: "Failed to fetch event" });
+  }
+});
+
+// Create a new event
+app.post("/events", async (req: Request, res: Response) => {
+  try {
+    const {
+      name,
+      location,
+      time,
+      date,
+      totalSpots,
+      eventType,
+      createdBy,
+      createdByUsername,
+    } = req.body;
+
+    if (
+      !name ||
+      !location ||
+      !time ||
+      !date ||
+      !totalSpots ||
+      !eventType ||
+      !createdBy
+    ) {
+      return res.status(400).json({ message: "Missing required fields" });
+    }
+
+    // Optionally, validate that createdBy is a valid user
+    const user = await User.findById(createdBy);
+    if (!user) {
+      return res.status(400).json({ message: "Invalid user ID" });
+    }
+
+    const newEvent = await Event.create({
+      name,
+      location,
+      time,
+      date,
+      totalSpots,
+      eventType,
+      createdBy,
+      createdByUsername: createdByUsername || user.username,
+      rosterSpotsFilled: 0,
+      roster: [],
+    });
+
+    res.status(201).json(newEvent);
+  } catch (error) {
+    res.status(500).json({ message: "Failed to create event" });
+  }
+});
+
+// Update an event (edit)
+app.put("/events/:id", async (req: Request, res: Response) => {
+  try {
+    const eventId = req.params.id;
+    const {
+      name,
+      location,
+      time,
+      date,
+      totalSpots,
+      eventType,
+      createdByUsername,
+    } = req.body;
+
+    const event = await Event.findById(eventId);
+    if (!event) {
+      return res.status(404).json({ message: "Event not found" });
+    }
+
+    event.name = name || event.name;
+    event.location = location || event.location;
+    event.time = time || event.time;
+    event.date = date || event.date;
+    event.totalSpots = totalSpots || event.totalSpots;
+    event.eventType = eventType || event.eventType;
+    event.createdByUsername = createdByUsername || event.createdByUsername;
+
+    await event.save();
+    res.status(200).json(event);
+  } catch (error) {
+    res.status(500).json({ message: "Failed to update event" });
+  }
+});
+
+// Add a player to the roster (append, not overwrite)
+app.post("/events/:id/roster", async (req: Request, res: Response) => {
+  const eventId = req.params.id;
+  const { player } = req.body; // player: { username, paidStatus, jerseyColor, position }
+  if (!player || !player.username) {
+    return res.status(400).json({ message: "Missing player data" });
+  }
+  try {
+    const event = await Event.findById(eventId);
+    if (!event) {
+      return res.status(404).json({ message: "Event not found" });
+    }
+    // Prevent duplicate usernames (optional)
+    if (event.roster.some((p: any) => p.username === player.username)) {
+      return res.status(409).json({ message: "Player already in roster" });
+    }
+    event.roster.push(player);
+    event.rosterSpotsFilled = event.roster.length;
+    await event.save();
+    return res.status(200).json({ success: true, roster: event.roster });
+  } catch (error) {
+    console.error("Error adding player to roster:", error);
+    return res.status(500).json({ message: "Error adding player to roster" });
+  }
+});
+
+// Remove a player from the roster
+app.delete(
+  "/events/:id/roster/:username",
+  async (req: Request, res: Response) => {
+    const eventId = req.params.id;
+    const username = req.params.username;
+    try {
+      const event = await Event.findById(eventId);
+      if (!event) {
+        return res.status(404).json({ message: "Event not found" });
+      }
+      const initialLength = event.roster.length;
+      event.roster = event.roster.filter((p: any) => p.username !== username);
+      if (event.roster.length === initialLength) {
+        return res.status(404).json({ message: "Player not found in roster" });
+      }
+      event.rosterSpotsFilled = event.roster.length;
+      await event.save();
+      return res.status(200).json({ success: true, roster: event.roster });
+    } catch (error) {
+      console.error("Error removing player from roster:", error);
+      return res
+        .status(500)
+        .json({ message: "Error removing player from roster" });
+    }
+  }
+);
+
+// Update rosterSpotsFilled (join/leave event, legacy)
+app.patch("/events/:id/roster", async (req: Request, res: Response) => {
+  try {
+    const eventId = req.params.id;
+    const { playerAdded } = req.body;
+
+    const event = await Event.findById(eventId);
+    if (!event) {
+      return res.status(404).json({ message: "Event not found" });
+    }
+
+    if (typeof playerAdded !== "boolean") {
+      return res.status(400).json({ message: "playerAdded must be boolean" });
+    }
+
+    if (playerAdded) {
+      if (event.rosterSpotsFilled < event.totalSpots) {
+        event.rosterSpotsFilled += 1;
+      }
+    } else {
+      if (event.rosterSpotsFilled > 0) {
+        event.rosterSpotsFilled -= 1;
+      }
+    }
+
+    await event.save();
+    res.status(200).json({ rosterSpotsFilled: event.rosterSpotsFilled });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to update roster" });
+  }
+});
+
+// Delete an event
+app.delete("/events/:id", async (req: Request, res: Response) => {
+  try {
+    const eventId = req.params.id;
+    const event = await Event.findById(eventId);
+    if (!event) {
+      return res.status(404).json({ message: "Event not found" });
+    }
+    await Event.findByIdAndDelete(eventId);
+    res.sendStatus(204);
+  } catch (error) {
+    res.status(500).json({ message: "Failed to delete event" });
+  }
+});
+
+// ==================== END EVENT ENDPOINTS ====================
+
 // User API to register account
 app.post("/auth/register", async (req: Request, res: Response) => {
   try {
-    // Get user data from the request body
     const { name, email, username, password } = req.body;
 
-    // Check if the email or username already exists in the database
     const emailAlreadyExists = await User.findOne({ email });
     const usernameAlreadyExists = await User.findOne({ username });
 
@@ -167,7 +377,7 @@ app.put("/user/profile-pic", async (req: Request, res: Response) => {
       return res.status(404).json({ error: "User not found" });
     }
 
-    user.profilePicUrl = profilePicUrl; // Update the profilePicUrl
+    user.profilePicUrl = profilePicUrl;
     await user.save();
 
     return res
@@ -178,7 +388,7 @@ app.put("/user/profile-pic", async (req: Request, res: Response) => {
   }
 });
 
-// New endpoint to update an event's roster
+// Legacy: bulk update roster (not recommended for add/remove single player)
 app.put("/events/:id/roster", async (req: Request, res: Response) => {
   const eventId = req.params.id;
   const { roster } = req.body;
@@ -187,8 +397,8 @@ app.put("/events/:id/roster", async (req: Request, res: Response) => {
     if (!event) {
       return res.status(404).json({ message: "Event not found" });
     }
-    // Update the event's roster. Make sure your Event schema defines a "roster" field.
     event.roster = roster;
+    event.rosterSpotsFilled = roster.length;
     await event.save();
     return res.status(200).json({ success: true, roster: event.roster });
   } catch (error) {
@@ -197,156 +407,197 @@ app.put("/events/:id/roster", async (req: Request, res: Response) => {
   }
 });
 
+// ==================== COMMUNITY NOTES ENDPOINTS ====================
+
 // Get all posts
-app.get("/community-notes", async (req, res) => {
-  const notes = await communityNote.find();
-  res.json(notes);
+app.get("/community-notes", async (req: Request, res: Response) => {
+  try {
+    const posts = await communityNote.find();
+    res.status(200).json(posts);
+  } catch (error) {
+    res.status(500).json({ message: "Failed to fetch posts." });
+  }
 });
 
-// Create a post
-app.post("/community-notes", async (req, res) => {
-  const { text, userId, username } = req.body;
-  const note = await communityNote.create({
-    text,
-    userId,
-    username,
-    comments: [],
-  });
-  res.status(201).json(note);
+// Create a new post
+app.post("/community-notes", async (req: Request, res: Response) => {
+  try {
+    const { text, userId, username } = req.body;
+    if (!text || !userId || !username) {
+      return res.status(400).json({ message: "Missing required fields." });
+    }
+    const newPost = await communityNote.create({
+      text,
+      userId,
+      username,
+      comments: [],
+    });
+    res.status(201).json(newPost);
+  } catch (error) {
+    res.status(500).json({ message: "Failed to create post." });
+  }
 });
 
 // Edit a post
-app.put("/community-notes/:id", async (req, res) => {
-  const { text } = req.body;
-  const note = await communityNote.findById(req.params.id);
-  if (!note) {
-    return res.status(404).json({ message: "Post not found" });
+app.put("/community-notes/:postId", async (req: Request, res: Response) => {
+  try {
+    const { text } = req.body;
+    const post = await communityNote.findById(req.params.postId);
+    if (!post) return res.status(404).json({ message: "Post not found." });
+    post.text = text || post.text;
+    await post.save();
+    res.status(200).json({ text: post.text });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to edit post." });
   }
-  note.text = text;
-  await note.save();
-  res.json({ text: note.text });
-});
-
-// Add a comment
-app.post("/community-notes/:id/comments", async (req, res) => {
-  const { text, userId, username } = req.body;
-  const note = await communityNote.findById(req.params.id);
-  if (!note) {
-    return res.status(404).json({ message: "Post not found" });
-  }
-  note.comments.push({ text, userId, username });
-  await note.save();
-  res.status(201).json({ comments: note.comments });
-});
-
-// Edit a comment
-app.put("/community-notes/:postId/comments/:commentId", async (req, res) => {
-  const { text } = req.body;
-  const note = await communityNote.findById(req.params.postId);
-  if (!note) {
-    return res.status(404).json({ message: "Post not found" });
-  }
-  const comment = note.comments.id(req.params.commentId);
-  if (!comment) {
-    return res.status(404).json({ message: "Comment not found" });
-  }
-  comment.text = text;
-  await note.save();
-  res.json({ text: comment.text });
 });
 
 // Delete a post
-app.delete("/community-notes/:id", async (req, res) => {
-  await communityNote.findByIdAndDelete(req.params.id);
-  res.sendStatus(204);
+app.delete("/community-notes/:postId", async (req: Request, res: Response) => {
+  try {
+    const post = await communityNote.findByIdAndDelete(req.params.postId);
+    if (!post) return res.status(404).json({ message: "Post not found." });
+    res.sendStatus(204);
+  } catch (error) {
+    res.status(500).json({ message: "Failed to delete post." });
+  }
 });
 
-// Delete a comment
-app.delete("/community-notes/:postId/comments/:commentId", async (req, res) => {
-  const note = await communityNote.findById(req.params.postId);
-  if (!note) {
-    return res.status(404).json({ message: "Post not found" });
+// Add a comment to a post
+app.post(
+  "/community-notes/:postId/comments",
+  async (req: Request, res: Response) => {
+    try {
+      const { text, userId, username } = req.body;
+      if (!text || !userId || !username) {
+        return res.status(400).json({ message: "Missing required fields." });
+      }
+      const post = await communityNote.findById(req.params.postId);
+      if (!post) return res.status(404).json({ message: "Post not found." });
+      const comment = {
+        text,
+        userId,
+        username,
+        replies: [],
+      };
+      post.comments.push(comment);
+      await post.save();
+      res.status(201).json({ comments: post.comments });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to add comment." });
+    }
   }
-  note.comments.pull({ _id: req.params.commentId });
-  await note.save();
-  res.status(200).json({ comments: note.comments });
-});
+);
+
+// Edit a comment
+app.put(
+  "/community-notes/:postId/comments/:commentId",
+  async (req: Request, res: Response) => {
+    try {
+      const { text } = req.body;
+      const post = await communityNote.findById(req.params.postId);
+      if (!post) return res.status(404).json({ message: "Post not found." });
+      const comment = post.comments.id(req.params.commentId);
+      if (!comment)
+        return res.status(404).json({ message: "Comment not found." });
+      comment.text = text || comment.text;
+      await post.save();
+      res.status(200).json({ text: comment.text });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to edit comment." });
+    }
+  }
+);
+
+// Delete a comment
+app.delete(
+  "/community-notes/:postId/comments/:commentId",
+  async (req: Request, res: Response) => {
+    try {
+      const post = await communityNote.findById(req.params.postId);
+      if (!post) return res.status(404).json({ message: "Post not found." });
+      const comment = post.comments.id(req.params.commentId);
+      if (!comment)
+        return res.status(404).json({ message: "Comment not found." });
+      comment.remove();
+      await post.save();
+      res.status(200).json({ comments: post.comments });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to delete comment." });
+    }
+  }
+);
 
 // Add a reply to a comment
 app.post(
   "/community-notes/:postId/comments/:commentId/replies",
-  async (req, res) => {
-    const { text, userId, username } = req.body;
-    const { postId, commentId } = req.params;
-    const note = await communityNote.findById(postId);
-    if (!note) {
-      return res.status(404).json({ message: "Post not found" });
+  async (req: Request, res: Response) => {
+    try {
+      const { text, userId, username } = req.body;
+      if (!text || !userId || !username) {
+        return res.status(400).json({ message: "Missing required fields." });
+      }
+      const post = await communityNote.findById(req.params.postId);
+      if (!post) return res.status(404).json({ message: "Post not found." });
+      const comment = post.comments.id(req.params.commentId);
+      if (!comment)
+        return res.status(404).json({ message: "Comment not found." });
+      comment.replies.push({ text, userId, username });
+      await post.save();
+      res.status(201).json({ replies: comment.replies });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to add reply." });
     }
-    const comment = note.comments.id(commentId);
-    if (!comment) {
-      return res.status(404).json({ message: "Comment not found" });
-    }
-    comment.replies.push({ text, userId, username });
-    await note.save();
-    res.status(201).json({ replies: comment.replies });
   }
 );
 
 // Edit a reply
 app.put(
   "/community-notes/:postId/comments/:commentId/replies/:replyId",
-  async (req, res) => {
-    const { text } = req.body;
-    const { postId, commentId, replyId } = req.params;
-    const note = await communityNote.findById(postId);
-    if (!note) {
-      return res.status(404).json({ message: "Post not found" });
+  async (req: Request, res: Response) => {
+    try {
+      const { text } = req.body;
+      const post = await communityNote.findById(req.params.postId);
+      if (!post) return res.status(404).json({ message: "Post not found." });
+      const comment = post.comments.id(req.params.commentId);
+      if (!comment)
+        return res.status(404).json({ message: "Comment not found." });
+      const reply = comment.replies.id(req.params.replyId);
+      if (!reply) return res.status(404).json({ message: "Reply not found." });
+      reply.text = text || reply.text;
+      await post.save();
+      res.status(200).json({ text: reply.text });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to edit reply." });
     }
-    const comment = note.comments.id(commentId);
-    if (!comment) {
-      return res.status(404).json({ message: "Comment not found" });
-    }
-    const reply = comment.replies.id(replyId);
-    if (!reply) {
-      return res.status(404).json({ message: "Reply not found" });
-    }
-    reply.text = text;
-    await note.save();
-    res.json({ text: reply.text });
   }
 );
 
-// Delete a reply from a comment (FIXED)
+// Delete a reply
 app.delete(
   "/community-notes/:postId/comments/:commentId/replies/:replyId",
-  async (req, res) => {
-    const { postId, commentId, replyId } = req.params;
-    const note = await communityNote.findById(postId);
-    if (!note) {
-      return res.status(404).json({ message: "Post not found" });
+  async (req: Request, res: Response) => {
+    try {
+      const post = await communityNote.findById(req.params.postId);
+      if (!post) return res.status(404).json({ message: "Post not found." });
+      const comment = post.comments.id(req.params.commentId);
+      if (!comment)
+        return res.status(404).json({ message: "Comment not found." });
+      const reply = comment.replies.id(req.params.replyId);
+      if (!reply) return res.status(404).json({ message: "Reply not found." });
+      reply.remove();
+      await post.save();
+      res.status(200).json({ replies: comment.replies });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to delete reply." });
     }
-    const comment = note.comments.id(commentId);
-    if (!comment) {
-      return res.status(404).json({ message: "Comment not found" });
-    }
-    // Find the index of the reply to remove
-    const replyIndex = comment.replies.findIndex(
-      (reply: any) => reply._id.toString() === replyId
-    );
-    if (replyIndex === -1) {
-      return res.status(404).json({ message: "Reply not found" });
-    }
-    comment.replies.splice(replyIndex, 1);
-    await note.save();
-    res.status(200).json({ replies: comment.replies });
   }
 );
+
+// ==================== END COMMUNITY NOTES ENDPOINTS ====================
 
 // Declare The PORT
 const PORT = process.env.PORT || 8001;
-app.get("/", (req: Request, res: Response) => {
-  res.send("Welcome to a better way to play!");
-});
 
 app.listen(PORT, async () => {
   console.log(`🗄️ Server Fire on http://localhost:${PORT}`);
@@ -359,6 +610,6 @@ app.listen(PORT, async () => {
     console.log("🛢️ Connected To Database");
   } catch (error) {
     console.log("⚠️ Error connecting to the database:", error);
-    process.exit(1); // Exit the process
+    process.exit(1);
   }
 });

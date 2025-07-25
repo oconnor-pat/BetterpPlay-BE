@@ -29,8 +29,7 @@ const PlayerSchema = new mongoose_1.Schema({
     paidStatus: { type: String, required: true },
     jerseyColor: { type: String, required: true },
     position: { type: String, required: true },
-}, { _id: false } // optionally disable _id for subdocuments if not needed
-);
+}, { _id: false });
 const EventSchema = new mongoose_1.Schema({
     name: { type: String, required: true },
     location: { type: String, required: true },
@@ -40,6 +39,7 @@ const EventSchema = new mongoose_1.Schema({
     rosterSpotsFilled: { type: Number, default: 0 },
     eventType: { type: String, required: true },
     createdBy: { type: String, required: true },
+    createdByUsername: { type: String }, // <-- Added field
     roster: { type: [PlayerSchema], default: [] },
 }, { timestamps: true });
 const Event = mongoose_1.default.model("Event", EventSchema);

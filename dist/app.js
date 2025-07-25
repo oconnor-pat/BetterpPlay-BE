@@ -60,19 +60,195 @@ app.use((req, res, next) => __awaiter(void 0, void 0, void 0, function* () {
 }));
 // Check server availability
 app.get("/check", (req, res) => {
-    // Return a 200 status if the server is available
     res.sendStatus(200);
 });
 // Basic welcome route
 app.get("/", (req, res) => {
     res.send("Welcome to a better way to play!");
 });
+// ==================== EVENT ENDPOINTS ====================
+// Get all events (include roster)
+app.get("/events", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const events = yield event_1.default.find();
+        res.status(200).json(events);
+    }
+    catch (error) {
+        res.status(500).json({ message: "Failed to fetch events" });
+    }
+}));
+// Get a single event (include roster)
+app.get("/events/:id", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const event = yield event_1.default.findById(req.params.id);
+        if (!event) {
+            return res.status(404).json({ message: "Event not found" });
+        }
+        res.status(200).json(event);
+    }
+    catch (error) {
+        res.status(500).json({ message: "Failed to fetch event" });
+    }
+}));
+// Create a new event
+app.post("/events", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { name, location, time, date, totalSpots, eventType, createdBy, createdByUsername, } = req.body;
+        if (!name ||
+            !location ||
+            !time ||
+            !date ||
+            !totalSpots ||
+            !eventType ||
+            !createdBy) {
+            return res.status(400).json({ message: "Missing required fields" });
+        }
+        // Optionally, validate that createdBy is a valid user
+        const user = yield user_1.default.findById(createdBy);
+        if (!user) {
+            return res.status(400).json({ message: "Invalid user ID" });
+        }
+        const newEvent = yield event_1.default.create({
+            name,
+            location,
+            time,
+            date,
+            totalSpots,
+            eventType,
+            createdBy,
+            createdByUsername: createdByUsername || user.username,
+            rosterSpotsFilled: 0,
+            roster: [],
+        });
+        res.status(201).json(newEvent);
+    }
+    catch (error) {
+        res.status(500).json({ message: "Failed to create event" });
+    }
+}));
+// Update an event (edit)
+app.put("/events/:id", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const eventId = req.params.id;
+        const { name, location, time, date, totalSpots, eventType, createdByUsername, } = req.body;
+        const event = yield event_1.default.findById(eventId);
+        if (!event) {
+            return res.status(404).json({ message: "Event not found" });
+        }
+        event.name = name || event.name;
+        event.location = location || event.location;
+        event.time = time || event.time;
+        event.date = date || event.date;
+        event.totalSpots = totalSpots || event.totalSpots;
+        event.eventType = eventType || event.eventType;
+        event.createdByUsername = createdByUsername || event.createdByUsername;
+        yield event.save();
+        res.status(200).json(event);
+    }
+    catch (error) {
+        res.status(500).json({ message: "Failed to update event" });
+    }
+}));
+// Add a player to the roster (append, not overwrite)
+app.post("/events/:id/roster", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    const eventId = req.params.id;
+    const { player } = req.body; // player: { username, paidStatus, jerseyColor, position }
+    if (!player || !player.username) {
+        return res.status(400).json({ message: "Missing player data" });
+    }
+    try {
+        const event = yield event_1.default.findById(eventId);
+        if (!event) {
+            return res.status(404).json({ message: "Event not found" });
+        }
+        // Prevent duplicate usernames (optional)
+        if (event.roster.some((p) => p.username === player.username)) {
+            return res.status(409).json({ message: "Player already in roster" });
+        }
+        event.roster.push(player);
+        event.rosterSpotsFilled = event.roster.length;
+        yield event.save();
+        return res.status(200).json({ success: true, roster: event.roster });
+    }
+    catch (error) {
+        console.error("Error adding player to roster:", error);
+        return res.status(500).json({ message: "Error adding player to roster" });
+    }
+}));
+// Remove a player from the roster
+app.delete("/events/:id/roster/:username", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    const eventId = req.params.id;
+    const username = req.params.username;
+    try {
+        const event = yield event_1.default.findById(eventId);
+        if (!event) {
+            return res.status(404).json({ message: "Event not found" });
+        }
+        const initialLength = event.roster.length;
+        event.roster = event.roster.filter((p) => p.username !== username);
+        if (event.roster.length === initialLength) {
+            return res.status(404).json({ message: "Player not found in roster" });
+        }
+        event.rosterSpotsFilled = event.roster.length;
+        yield event.save();
+        return res.status(200).json({ success: true, roster: event.roster });
+    }
+    catch (error) {
+        console.error("Error removing player from roster:", error);
+        return res
+            .status(500)
+            .json({ message: "Error removing player from roster" });
+    }
+}));
+// Update rosterSpotsFilled (join/leave event, legacy)
+app.patch("/events/:id/roster", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const eventId = req.params.id;
+        const { playerAdded } = req.body;
+        const event = yield event_1.default.findById(eventId);
+        if (!event) {
+            return res.status(404).json({ message: "Event not found" });
+        }
+        if (typeof playerAdded !== "boolean") {
+            return res.status(400).json({ message: "playerAdded must be boolean" });
+        }
+        if (playerAdded) {
+            if (event.rosterSpotsFilled < event.totalSpots) {
+                event.rosterSpotsFilled += 1;
+            }
+        }
+        else {
+            if (event.rosterSpotsFilled > 0) {
+                event.rosterSpotsFilled -= 1;
+            }
+        }
+        yield event.save();
+        res.status(200).json({ rosterSpotsFilled: event.rosterSpotsFilled });
+    }
+    catch (error) {
+        res.status(500).json({ message: "Failed to update roster" });
+    }
+}));
+// Delete an event
+app.delete("/events/:id", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const eventId = req.params.id;
+        const event = yield event_1.default.findById(eventId);
+        if (!event) {
+            return res.status(404).json({ message: "Event not found" });
+        }
+        yield event_1.default.findByIdAndDelete(eventId);
+        res.sendStatus(204);
+    }
+    catch (error) {
+        res.status(500).json({ message: "Failed to delete event" });
+    }
+}));
+// ==================== END EVENT ENDPOINTS ====================
 // User API to register account
 app.post("/auth/register", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        // Get user data from the request body
         const { name, email, username, password } = req.body;
-        // Check if the email or username already exists in the database
         const emailAlreadyExists = yield user_1.default.findOne({ email });
         const usernameAlreadyExists = yield user_1.default.findOne({ username });
         if (emailAlreadyExists) {
@@ -158,7 +334,7 @@ app.put("/user/profile-pic", (req, res) => __awaiter(void 0, void 0, void 0, fun
         if (!user) {
             return res.status(404).json({ error: "User not found" });
         }
-        user.profilePicUrl = profilePicUrl; // Update the profilePicUrl
+        user.profilePicUrl = profilePicUrl;
         yield user.save();
         return res
             .status(200)
@@ -168,7 +344,7 @@ app.put("/user/profile-pic", (req, res) => __awaiter(void 0, void 0, void 0, fun
         return res.status(500).json({ error: "Failed to update profile picture" });
     }
 }));
-// New endpoint to update an event's roster
+// Legacy: bulk update roster (not recommended for add/remove single player)
 app.put("/events/:id/roster", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     const eventId = req.params.id;
     const { roster } = req.body;
@@ -177,8 +353,8 @@ app.put("/events/:id/roster", (req, res) => __awaiter(void 0, void 0, void 0, fu
         if (!event) {
             return res.status(404).json({ message: "Event not found" });
         }
-        // Update the event's roster. Make sure your Event schema defines a "roster" field.
         event.roster = roster;
+        event.rosterSpotsFilled = roster.length;
         yield event.save();
         return res.status(200).json({ success: true, roster: event.roster });
     }
@@ -187,135 +363,187 @@ app.put("/events/:id/roster", (req, res) => __awaiter(void 0, void 0, void 0, fu
         return res.status(500).json({ message: "Error updating event roster" });
     }
 }));
+// ==================== COMMUNITY NOTES ENDPOINTS ====================
 // Get all posts
 app.get("/community-notes", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    const notes = yield communityNote_1.default.find();
-    res.json(notes);
+    try {
+        const posts = yield communityNote_1.default.find();
+        res.status(200).json(posts);
+    }
+    catch (error) {
+        res.status(500).json({ message: "Failed to fetch posts." });
+    }
 }));
-// Create a post
+// Create a new post
 app.post("/community-notes", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    const { text, userId, username } = req.body;
-    const note = yield communityNote_1.default.create({
-        text,
-        userId,
-        username,
-        comments: [],
-    });
-    res.status(201).json(note);
+    try {
+        const { text, userId, username } = req.body;
+        if (!text || !userId || !username) {
+            return res.status(400).json({ message: "Missing required fields." });
+        }
+        const newPost = yield communityNote_1.default.create({
+            text,
+            userId,
+            username,
+            comments: [],
+        });
+        res.status(201).json(newPost);
+    }
+    catch (error) {
+        res.status(500).json({ message: "Failed to create post." });
+    }
 }));
 // Edit a post
-app.put("/community-notes/:id", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    const { text } = req.body;
-    const note = yield communityNote_1.default.findById(req.params.id);
-    if (!note) {
-        return res.status(404).json({ message: "Post not found" });
+app.put("/community-notes/:postId", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { text } = req.body;
+        const post = yield communityNote_1.default.findById(req.params.postId);
+        if (!post)
+            return res.status(404).json({ message: "Post not found." });
+        post.text = text || post.text;
+        yield post.save();
+        res.status(200).json({ text: post.text });
     }
-    note.text = text;
-    yield note.save();
-    res.json({ text: note.text });
+    catch (error) {
+        res.status(500).json({ message: "Failed to edit post." });
+    }
 }));
-// Add a comment
-app.post("/community-notes/:id/comments", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    const { text, userId, username } = req.body;
-    const note = yield communityNote_1.default.findById(req.params.id);
-    if (!note) {
-        return res.status(404).json({ message: "Post not found" });
+// Delete a post
+app.delete("/community-notes/:postId", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const post = yield communityNote_1.default.findByIdAndDelete(req.params.postId);
+        if (!post)
+            return res.status(404).json({ message: "Post not found." });
+        res.sendStatus(204);
     }
-    note.comments.push({ text, userId, username });
-    yield note.save();
-    res.status(201).json({ comments: note.comments });
+    catch (error) {
+        res.status(500).json({ message: "Failed to delete post." });
+    }
+}));
+// Add a comment to a post
+app.post("/community-notes/:postId/comments", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { text, userId, username } = req.body;
+        if (!text || !userId || !username) {
+            return res.status(400).json({ message: "Missing required fields." });
+        }
+        const post = yield communityNote_1.default.findById(req.params.postId);
+        if (!post)
+            return res.status(404).json({ message: "Post not found." });
+        const comment = {
+            text,
+            userId,
+            username,
+            replies: [],
+        };
+        post.comments.push(comment);
+        yield post.save();
+        res.status(201).json({ comments: post.comments });
+    }
+    catch (error) {
+        res.status(500).json({ message: "Failed to add comment." });
+    }
 }));
 // Edit a comment
 app.put("/community-notes/:postId/comments/:commentId", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    const { text } = req.body;
-    const note = yield communityNote_1.default.findById(req.params.postId);
-    if (!note) {
-        return res.status(404).json({ message: "Post not found" });
+    try {
+        const { text } = req.body;
+        const post = yield communityNote_1.default.findById(req.params.postId);
+        if (!post)
+            return res.status(404).json({ message: "Post not found." });
+        const comment = post.comments.id(req.params.commentId);
+        if (!comment)
+            return res.status(404).json({ message: "Comment not found." });
+        comment.text = text || comment.text;
+        yield post.save();
+        res.status(200).json({ text: comment.text });
     }
-    const comment = note.comments.id(req.params.commentId);
-    if (!comment) {
-        return res.status(404).json({ message: "Comment not found" });
+    catch (error) {
+        res.status(500).json({ message: "Failed to edit comment." });
     }
-    comment.text = text;
-    yield note.save();
-    res.json({ text: comment.text });
-}));
-// Delete a post
-app.delete("/community-notes/:id", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    yield communityNote_1.default.findByIdAndDelete(req.params.id);
-    res.sendStatus(204);
 }));
 // Delete a comment
 app.delete("/community-notes/:postId/comments/:commentId", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    const note = yield communityNote_1.default.findById(req.params.postId);
-    if (!note) {
-        return res.status(404).json({ message: "Post not found" });
+    try {
+        const post = yield communityNote_1.default.findById(req.params.postId);
+        if (!post)
+            return res.status(404).json({ message: "Post not found." });
+        const comment = post.comments.id(req.params.commentId);
+        if (!comment)
+            return res.status(404).json({ message: "Comment not found." });
+        comment.remove();
+        yield post.save();
+        res.status(200).json({ comments: post.comments });
     }
-    note.comments.pull({ _id: req.params.commentId });
-    yield note.save();
-    res.status(200).json({ comments: note.comments });
+    catch (error) {
+        res.status(500).json({ message: "Failed to delete comment." });
+    }
 }));
 // Add a reply to a comment
 app.post("/community-notes/:postId/comments/:commentId/replies", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    const { text, userId, username } = req.body;
-    const { postId, commentId } = req.params;
-    const note = yield communityNote_1.default.findById(postId);
-    if (!note) {
-        return res.status(404).json({ message: "Post not found" });
+    try {
+        const { text, userId, username } = req.body;
+        if (!text || !userId || !username) {
+            return res.status(400).json({ message: "Missing required fields." });
+        }
+        const post = yield communityNote_1.default.findById(req.params.postId);
+        if (!post)
+            return res.status(404).json({ message: "Post not found." });
+        const comment = post.comments.id(req.params.commentId);
+        if (!comment)
+            return res.status(404).json({ message: "Comment not found." });
+        comment.replies.push({ text, userId, username });
+        yield post.save();
+        res.status(201).json({ replies: comment.replies });
     }
-    const comment = note.comments.id(commentId);
-    if (!comment) {
-        return res.status(404).json({ message: "Comment not found" });
+    catch (error) {
+        res.status(500).json({ message: "Failed to add reply." });
     }
-    comment.replies.push({ text, userId, username });
-    yield note.save();
-    res.status(201).json({ replies: comment.replies });
 }));
 // Edit a reply
 app.put("/community-notes/:postId/comments/:commentId/replies/:replyId", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    const { text } = req.body;
-    const { postId, commentId, replyId } = req.params;
-    const note = yield communityNote_1.default.findById(postId);
-    if (!note) {
-        return res.status(404).json({ message: "Post not found" });
+    try {
+        const { text } = req.body;
+        const post = yield communityNote_1.default.findById(req.params.postId);
+        if (!post)
+            return res.status(404).json({ message: "Post not found." });
+        const comment = post.comments.id(req.params.commentId);
+        if (!comment)
+            return res.status(404).json({ message: "Comment not found." });
+        const reply = comment.replies.id(req.params.replyId);
+        if (!reply)
+            return res.status(404).json({ message: "Reply not found." });
+        reply.text = text || reply.text;
+        yield post.save();
+        res.status(200).json({ text: reply.text });
     }
-    const comment = note.comments.id(commentId);
-    if (!comment) {
-        return res.status(404).json({ message: "Comment not found" });
+    catch (error) {
+        res.status(500).json({ message: "Failed to edit reply." });
     }
-    const reply = comment.replies.id(replyId);
-    if (!reply) {
-        return res.status(404).json({ message: "Reply not found" });
-    }
-    reply.text = text;
-    yield note.save();
-    res.json({ text: reply.text });
 }));
-// Delete a reply from a comment (FIXED)
+// Delete a reply
 app.delete("/community-notes/:postId/comments/:commentId/replies/:replyId", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    const { postId, commentId, replyId } = req.params;
-    const note = yield communityNote_1.default.findById(postId);
-    if (!note) {
-        return res.status(404).json({ message: "Post not found" });
+    try {
+        const post = yield communityNote_1.default.findById(req.params.postId);
+        if (!post)
+            return res.status(404).json({ message: "Post not found." });
+        const comment = post.comments.id(req.params.commentId);
+        if (!comment)
+            return res.status(404).json({ message: "Comment not found." });
+        const reply = comment.replies.id(req.params.replyId);
+        if (!reply)
+            return res.status(404).json({ message: "Reply not found." });
+        reply.remove();
+        yield post.save();
+        res.status(200).json({ replies: comment.replies });
     }
-    const comment = note.comments.id(commentId);
-    if (!comment) {
-        return res.status(404).json({ message: "Comment not found" });
+    catch (error) {
+        res.status(500).json({ message: "Failed to delete reply." });
     }
-    // Find the index of the reply to remove
-    const replyIndex = comment.replies.findIndex((reply) => reply._id.toString() === replyId);
-    if (replyIndex === -1) {
-        return res.status(404).json({ message: "Reply not found" });
-    }
-    comment.replies.splice(replyIndex, 1);
-    yield note.save();
-    res.status(200).json({ replies: comment.replies });
 }));
+// ==================== END COMMUNITY NOTES ENDPOINTS ====================
 // Declare The PORT
 const PORT = process.env.PORT || 8001;
-app.get("/", (req, res) => {
-    res.send("Welcome to a better way to play!");
-});
 app.listen(PORT, () => __awaiter(void 0, void 0, void 0, function* () {
     console.log(`🗄️ Server Fire on http://localhost:${PORT}`);
     // Connect to Database
@@ -326,6 +554,6 @@ app.listen(PORT, () => __awaiter(void 0, void 0, void 0, function* () {
     }
     catch (error) {
         console.log("⚠️ Error connecting to the database:", error);
-        process.exit(1); // Exit the process
+        process.exit(1);
     }
 }));
