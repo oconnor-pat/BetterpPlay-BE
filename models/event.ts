@@ -28,6 +28,8 @@ export interface IEvent extends Document {
   createdBy: string;
   createdByUsername?: string; // <-- Added field
   roster: IPlayer[];
+  latitude?: number;
+  longitude?: number;
 }
 
 const EventSchema: Schema = new Schema(
@@ -42,6 +44,8 @@ const EventSchema: Schema = new Schema(
     createdBy: { type: String, required: true },
     createdByUsername: { type: String }, // <-- Added field
     roster: { type: [PlayerSchema], default: [] },
+    latitude: { type: Number, required: false },
+    longitude: { type: Number, required: false },
   },
   { timestamps: true }
 );

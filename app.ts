@@ -101,6 +101,8 @@ app.post("/events", async (req: Request, res: Response) => {
       eventType,
       createdBy,
       createdByUsername,
+      latitude,
+      longitude,
     } = req.body;
 
     if (
@@ -132,6 +134,8 @@ app.post("/events", async (req: Request, res: Response) => {
       createdByUsername: createdByUsername || user.username,
       rosterSpotsFilled: 0,
       roster: [],
+      latitude,
+      longitude,
     });
 
     res.status(201).json(newEvent);
@@ -152,6 +156,8 @@ app.put("/events/:id", async (req: Request, res: Response) => {
       totalSpots,
       eventType,
       createdByUsername,
+      latitude,
+      longitude,
     } = req.body;
 
     const event = await Event.findById(eventId);
@@ -166,6 +172,9 @@ app.put("/events/:id", async (req: Request, res: Response) => {
     event.totalSpots = totalSpots || event.totalSpots;
     event.eventType = eventType || event.eventType;
     event.createdByUsername = createdByUsername || event.createdByUsername;
+
+    if (latitude !== undefined) event.latitude = latitude;
+    if (longitude !== undefined) event.longitude = longitude;
 
     await event.save();
     res.status(200).json(event);

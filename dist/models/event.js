@@ -41,6 +41,8 @@ const EventSchema = new mongoose_1.Schema({
     createdBy: { type: String, required: true },
     createdByUsername: { type: String }, // <-- Added field
     roster: { type: [PlayerSchema], default: [] },
+    latitude: { type: Number, required: false },
+    longitude: { type: Number, required: false },
 }, { timestamps: true });
 const Event = mongoose_1.default.model("Event", EventSchema);
 exports.default = Event;

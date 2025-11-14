@@ -93,7 +93,7 @@ app.get("/events/:id", (req, res) => __awaiter(void 0, void 0, void 0, function*
 // Create a new event
 app.post("/events", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const { name, location, time, date, totalSpots, eventType, createdBy, createdByUsername, } = req.body;
+        const { name, location, time, date, totalSpots, eventType, createdBy, createdByUsername, latitude, longitude, } = req.body;
         if (!name ||
             !location ||
             !time ||
@@ -119,6 +119,8 @@ app.post("/events", (req, res) => __awaiter(void 0, void 0, void 0, function* ()
             createdByUsername: createdByUsername || user.username,
             rosterSpotsFilled: 0,
             roster: [],
+            latitude,
+            longitude,
         });
         res.status(201).json(newEvent);
     }
@@ -130,7 +132,7 @@ app.post("/events", (req, res) => __awaiter(void 0, void 0, void 0, function* ()
 app.put("/events/:id", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const eventId = req.params.id;
-        const { name, location, time, date, totalSpots, eventType, createdByUsername, } = req.body;
+        const { name, location, time, date, totalSpots, eventType, createdByUsername, latitude, longitude, } = req.body;
         const event = yield event_1.default.findById(eventId);
         if (!event) {
             return res.status(404).json({ message: "Event not found" });
@@ -142,6 +144,10 @@ app.put("/events/:id", (req, res) => __awaiter(void 0, void 0, void 0, function*
         event.totalSpots = totalSpots || event.totalSpots;
         event.eventType = eventType || event.eventType;
         event.createdByUsername = createdByUsername || event.createdByUsername;
+        if (latitude !== undefined)
+            event.latitude = latitude;
+        if (longitude !== undefined)
+            event.longitude = longitude;
         yield event.save();
         res.status(200).json(event);
     }
