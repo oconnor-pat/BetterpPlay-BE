@@ -22,6 +22,7 @@ const dotenv_1 = __importDefault(require("dotenv"));
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 const cors_1 = __importDefault(require("cors"));
 const aws_sdk_1 = __importDefault(require("aws-sdk"));
+const express_validator_1 = require("express-validator");
 const app = (0, express_1.default)();
 // Enable CORS for all origins (development)
 app.use((0, cors_1.default)());
@@ -252,7 +253,18 @@ app.delete("/events/:id", (req, res) => __awaiter(void 0, void 0, void 0, functi
 }));
 // ==================== END EVENT ENDPOINTS ====================
 // User API to register account
-app.post("/auth/register", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+app.post("/auth/register", [
+    (0, express_validator_1.body)("name").notEmpty().withMessage("Name is required"),
+    (0, express_validator_1.body)("email").isEmail().withMessage("Valid email is required"),
+    (0, express_validator_1.body)("password")
+        .isLength({ min: 6 })
+        .withMessage("Password must be at least 6 characters"),
+], (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    // Check for validation errors
+    const errors = (0, express_validator_1.validationResult)(req);
+    if (!errors.isEmpty()) {
+        return res.status(400).json({ errors: errors.array() });
+    }
     try {
         const { name, email, username, password } = req.body;
         const emailAlreadyExists = yield user_1.default.findOne({ email });
@@ -280,7 +292,8 @@ app.post("/auth/register", (req, res) => __awaiter(void 0, void 0, void 0, funct
         return res.status(201).json({ success: true, user: newUser, token });
     }
     catch (error) {
-        return res
+        console.error("Error in /auth/register:", error);
+        res
             .status(500)
             .json({ message: "Failed to create a new user. Please try again" });
     }

@@ -8,6 +8,7 @@ import dotenv from "dotenv";
 import jwt from "jsonwebtoken";
 import cors from "cors";
 import AWS from "aws-sdk";
+import { body, validationResult } from "express-validator";
 
 const app: Application = express();
 
@@ -287,43 +288,60 @@ app.delete("/events/:id", async (req: Request, res: Response) => {
 // ==================== END EVENT ENDPOINTS ====================
 
 // User API to register account
-app.post("/auth/register", async (req: Request, res: Response) => {
-  try {
-    const { name, email, username, password } = req.body;
-
-    const emailAlreadyExists = await User.findOne({ email });
-    const usernameAlreadyExists = await User.findOne({ username });
-
-    if (emailAlreadyExists) {
-      return res
-        .status(400)
-        .json({ status: 400, message: "Email already in use" });
+app.post(
+  "/auth/register",
+  [
+    body("name").notEmpty().withMessage("Name is required"),
+    body("email").isEmail().withMessage("Valid email is required"),
+    body("password")
+      .isLength({ min: 6 })
+      .withMessage("Password must be at least 6 characters"),
+  ],
+  async (req: Request, res: Response) => {
+    // Check for validation errors
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
     }
 
-    if (usernameAlreadyExists) {
-      return res
-        .status(400)
-        .json({ status: 400, message: "Username already in use" });
+    try {
+      const { name, email, username, password } = req.body;
+
+      const emailAlreadyExists = await User.findOne({ email });
+      const usernameAlreadyExists = await User.findOne({ username });
+
+      if (emailAlreadyExists) {
+        return res
+          .status(400)
+          .json({ status: 400, message: "Email already in use" });
+      }
+
+      if (usernameAlreadyExists) {
+        return res
+          .status(400)
+          .json({ status: 400, message: "Username already in use" });
+      }
+
+      const hashedPassword = await bcrypt.hash(password, 10);
+      const newUser = await User.create({
+        name,
+        email,
+        username,
+        password: hashedPassword,
+      });
+
+      const token = jwt.sign({ id: newUser._id }, JWT_SECRET, {
+        expiresIn: "1h",
+      });
+      return res.status(201).json({ success: true, user: newUser, token });
+    } catch (error) {
+      console.error("Error in /auth/register:", error);
+      res
+        .status(500)
+        .json({ message: "Failed to create a new user. Please try again" });
     }
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const newUser = await User.create({
-      name,
-      email,
-      username,
-      password: hashedPassword,
-    });
-
-    const token = jwt.sign({ id: newUser._id }, JWT_SECRET, {
-      expiresIn: "1h",
-    });
-    return res.status(201).json({ success: true, user: newUser, token });
-  } catch (error) {
-    return res
-      .status(500)
-      .json({ message: "Failed to create a new user. Please try again" });
   }
-});
+);
 
 // User API to login
 app.post("/auth/login", async (req: Request, res: Response) => {
