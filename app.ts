@@ -436,12 +436,93 @@ app.put("/events/:id/roster", async (req: Request, res: Response) => {
 
 // ==================== COMMUNITY NOTES ENDPOINTS ====================
 
-// Get all posts
+// Get all posts (with profile pictures populated from Users collection)
 app.get("/community-notes", async (req: Request, res: Response) => {
   try {
-    const posts = await communityNote.find();
-    res.status(200).json(posts);
+    const posts = await communityNote.find().lean();
+    console.log("📝 Fetched posts count:", posts.length);
+
+    // Collect all unique userIds from posts, comments, and replies
+    const userIds = new Set<string>();
+    posts.forEach((post: any) => {
+      if (post.userId) userIds.add(String(post.userId));
+      post.comments?.forEach((comment: any) => {
+        if (comment.userId) userIds.add(String(comment.userId));
+        comment.replies?.forEach((reply: any) => {
+          if (reply.userId) userIds.add(String(reply.userId));
+        });
+      });
+    });
+
+    console.log("👥 Collected userIds:", Array.from(userIds));
+
+    // Convert string IDs to ObjectIds for MongoDB query
+    const objectIds = Array.from(userIds).map((id) => {
+      try {
+        return new mongoose.Types.ObjectId(id);
+      } catch {
+        return id;
+      }
+    });
+
+    // Fetch all users and create a lookup map
+    const users = await User.find({ _id: { $in: objectIds } }).lean();
+    console.log(
+      "🔍 Found users:",
+      users.map((u: any) => ({
+        id: u._id.toString(),
+        username: u.username,
+        profilePicUrl: u.profilePicUrl || "NO_PIC",
+      }))
+    );
+
+    const userMap = new Map<string, string>();
+    users.forEach((u: any) => {
+      userMap.set(u._id.toString(), u.profilePicUrl || "");
+    });
+
+    console.log("🗺️ User map entries:", Object.fromEntries(userMap));
+
+    // Populate profilePicUrl for posts, comments, and replies
+    const postsWithPhotos = posts.map((post: any) => {
+      const postUserId = String(post.userId);
+      const postPic = userMap.get(postUserId) || "";
+      console.log(
+        `📸 Post by ${post.username} (${postUserId}): pic = ${
+          postPic ? "YES" : "NO"
+        }`
+      );
+
+      return {
+        ...post,
+        profilePicUrl: postPic,
+        comments: post.comments?.map((comment: any) => {
+          const commentUserId = String(comment.userId);
+          const commentPic = userMap.get(commentUserId) || "";
+          return {
+            ...comment,
+            profilePicUrl: commentPic,
+            replies: comment.replies?.map((reply: any) => {
+              const replyUserId = String(reply.userId);
+              const replyPic = userMap.get(replyUserId) || "";
+              return {
+                ...reply,
+                profilePicUrl: replyPic,
+              };
+            }),
+          };
+        }),
+      };
+    });
+
+    console.log(
+      "✅ Sending postsWithPhotos, first post profilePicUrl:",
+      postsWithPhotos[0]?.profilePicUrl
+    );
+
+    res.status(200).json(postsWithPhotos);
   } catch (error) {
+    console.error("❌ Error fetching community notes:", error);
     res.status(500).json({ message: "Failed to fetch posts." });
   }
 });
@@ -453,10 +534,16 @@ app.post("/community-notes", async (req: Request, res: Response) => {
     if (!text || !userId || !username) {
       return res.status(400).json({ message: "Missing required fields." });
     }
+
+    // Fetch the user's current profile picture from the database
+    const user = await User.findById(userId).select("profilePicUrl");
+    const profilePicUrl = user?.profilePicUrl || "";
+
     const newPost = await communityNote.create({
       text,
       userId,
       username,
+      profilePicUrl,
       comments: [],
     });
     res.status(201).json(newPost);
@@ -501,10 +588,16 @@ app.post(
       }
       const post = await communityNote.findById(req.params.postId);
       if (!post) return res.status(404).json({ message: "Post not found." });
+
+      // Fetch the user's current profile picture from the database
+      const user = await User.findById(userId).select("profilePicUrl");
+      const profilePicUrl = user?.profilePicUrl || "";
+
       const comment = {
         text,
         userId,
         username,
+        profilePicUrl,
         replies: [],
       };
       post.comments.push(comment);
@@ -546,7 +639,7 @@ app.delete(
       const comment = post.comments.id(req.params.commentId);
       if (!comment)
         return res.status(404).json({ message: "Comment not found." });
-      comment.remove();
+      post.comments.pull(req.params.commentId);
       await post.save();
       res.status(200).json({ comments: post.comments });
     } catch (error) {
@@ -569,7 +662,17 @@ app.post(
       const comment = post.comments.id(req.params.commentId);
       if (!comment)
         return res.status(404).json({ message: "Comment not found." });
-      comment.replies.push({ text, userId, username });
+
+      // Fetch the user's current profile picture from the database
+      const user = await User.findById(userId).select("profilePicUrl");
+      const profilePicUrl = user?.profilePicUrl || "";
+
+      comment.replies.push({
+        text,
+        userId,
+        username,
+        profilePicUrl,
+      });
       await post.save();
       res.status(201).json({ replies: comment.replies });
     } catch (error) {
@@ -612,11 +715,97 @@ app.delete(
         return res.status(404).json({ message: "Comment not found." });
       const reply = comment.replies.id(req.params.replyId);
       if (!reply) return res.status(404).json({ message: "Reply not found." });
-      reply.remove();
+      comment.replies.pull(req.params.replyId);
       await post.save();
       res.status(200).json({ replies: comment.replies });
     } catch (error) {
       res.status(500).json({ message: "Failed to delete reply." });
+    }
+  }
+);
+
+// Toggle like on a post
+app.post(
+  "/community-notes/:postId/like",
+  async (req: Request, res: Response) => {
+    try {
+      const { userId } = req.body;
+      if (!userId) {
+        return res.status(400).json({ message: "Missing userId." });
+      }
+      const post = await communityNote.findById(req.params.postId);
+      if (!post) return res.status(404).json({ message: "Post not found." });
+
+      const likeIndex = post.likes.indexOf(userId);
+      if (likeIndex === -1) {
+        post.likes.push(userId);
+      } else {
+        post.likes.splice(likeIndex, 1);
+      }
+      await post.save();
+      res.status(200).json({ likes: post.likes });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to toggle like on post." });
+    }
+  }
+);
+
+// Toggle like on a comment
+app.post(
+  "/community-notes/:postId/comments/:commentId/like",
+  async (req: Request, res: Response) => {
+    try {
+      const { userId } = req.body;
+      if (!userId) {
+        return res.status(400).json({ message: "Missing userId." });
+      }
+      const post = await communityNote.findById(req.params.postId);
+      if (!post) return res.status(404).json({ message: "Post not found." });
+      const comment = post.comments.id(req.params.commentId);
+      if (!comment)
+        return res.status(404).json({ message: "Comment not found." });
+
+      const likeIndex = comment.likes.indexOf(userId);
+      if (likeIndex === -1) {
+        comment.likes.push(userId);
+      } else {
+        comment.likes.splice(likeIndex, 1);
+      }
+      await post.save();
+      res.status(200).json({ likes: comment.likes });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to toggle like on comment." });
+    }
+  }
+);
+
+// Toggle like on a reply
+app.post(
+  "/community-notes/:postId/comments/:commentId/replies/:replyId/like",
+  async (req: Request, res: Response) => {
+    try {
+      const { userId } = req.body;
+      if (!userId) {
+        return res.status(400).json({ message: "Missing userId." });
+      }
+      const post = await communityNote.findById(req.params.postId);
+      if (!post) return res.status(404).json({ message: "Post not found." });
+      const comment = post.comments.id(req.params.commentId);
+      if (!comment)
+        return res.status(404).json({ message: "Comment not found." });
+      const reply = comment.replies.id(req.params.replyId);
+      if (!reply) return res.status(404).json({ message: "Reply not found." });
+
+      const likeIndex = reply.likes.indexOf(userId);
+      if (likeIndex === -1) {
+        reply.likes.push(userId);
+      } else {
+        reply.likes.splice(likeIndex, 1);
+      }
+      await post.save();
+      res.status(200).json({ likes: reply.likes });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to toggle like on reply." });
     }
   }
 );

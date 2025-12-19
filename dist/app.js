@@ -383,13 +383,72 @@ app.put("/events/:id/roster", (req, res) => __awaiter(void 0, void 0, void 0, fu
     }
 }));
 // ==================== COMMUNITY NOTES ENDPOINTS ====================
-// Get all posts
+// Get all posts (with profile pictures populated from Users collection)
 app.get("/community-notes", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a;
     try {
-        const posts = yield communityNote_1.default.find();
-        res.status(200).json(posts);
+        const posts = yield communityNote_1.default.find().lean();
+        console.log("📝 Fetched posts count:", posts.length);
+        // Collect all unique userIds from posts, comments, and replies
+        const userIds = new Set();
+        posts.forEach((post) => {
+            var _a;
+            if (post.userId)
+                userIds.add(String(post.userId));
+            (_a = post.comments) === null || _a === void 0 ? void 0 : _a.forEach((comment) => {
+                var _a;
+                if (comment.userId)
+                    userIds.add(String(comment.userId));
+                (_a = comment.replies) === null || _a === void 0 ? void 0 : _a.forEach((reply) => {
+                    if (reply.userId)
+                        userIds.add(String(reply.userId));
+                });
+            });
+        });
+        console.log("👥 Collected userIds:", Array.from(userIds));
+        // Convert string IDs to ObjectIds for MongoDB query
+        const objectIds = Array.from(userIds).map((id) => {
+            try {
+                return new mongoose_1.default.Types.ObjectId(id);
+            }
+            catch (_a) {
+                return id;
+            }
+        });
+        // Fetch all users and create a lookup map
+        const users = yield user_1.default.find({ _id: { $in: objectIds } }).lean();
+        console.log("🔍 Found users:", users.map((u) => ({
+            id: u._id.toString(),
+            username: u.username,
+            profilePicUrl: u.profilePicUrl || "NO_PIC",
+        })));
+        const userMap = new Map();
+        users.forEach((u) => {
+            userMap.set(u._id.toString(), u.profilePicUrl || "");
+        });
+        console.log("🗺️ User map entries:", Object.fromEntries(userMap));
+        // Populate profilePicUrl for posts, comments, and replies
+        const postsWithPhotos = posts.map((post) => {
+            var _a;
+            const postUserId = String(post.userId);
+            const postPic = userMap.get(postUserId) || "";
+            console.log(`📸 Post by ${post.username} (${postUserId}): pic = ${postPic ? "YES" : "NO"}`);
+            return Object.assign(Object.assign({}, post), { profilePicUrl: postPic, comments: (_a = post.comments) === null || _a === void 0 ? void 0 : _a.map((comment) => {
+                    var _a;
+                    const commentUserId = String(comment.userId);
+                    const commentPic = userMap.get(commentUserId) || "";
+                    return Object.assign(Object.assign({}, comment), { profilePicUrl: commentPic, replies: (_a = comment.replies) === null || _a === void 0 ? void 0 : _a.map((reply) => {
+                            const replyUserId = String(reply.userId);
+                            const replyPic = userMap.get(replyUserId) || "";
+                            return Object.assign(Object.assign({}, reply), { profilePicUrl: replyPic });
+                        }) });
+                }) });
+        });
+        console.log("✅ Sending postsWithPhotos, first post profilePicUrl:", (_a = postsWithPhotos[0]) === null || _a === void 0 ? void 0 : _a.profilePicUrl);
+        res.status(200).json(postsWithPhotos);
     }
     catch (error) {
+        console.error("❌ Error fetching community notes:", error);
         res.status(500).json({ message: "Failed to fetch posts." });
     }
 }));
@@ -400,10 +459,14 @@ app.post("/community-notes", (req, res) => __awaiter(void 0, void 0, void 0, fun
         if (!text || !userId || !username) {
             return res.status(400).json({ message: "Missing required fields." });
         }
+        // Fetch the user's current profile picture from the database
+        const user = yield user_1.default.findById(userId).select("profilePicUrl");
+        const profilePicUrl = (user === null || user === void 0 ? void 0 : user.profilePicUrl) || "";
         const newPost = yield communityNote_1.default.create({
             text,
             userId,
             username,
+            profilePicUrl,
             comments: [],
         });
         res.status(201).json(newPost);
@@ -449,10 +512,14 @@ app.post("/community-notes/:postId/comments", (req, res) => __awaiter(void 0, vo
         const post = yield communityNote_1.default.findById(req.params.postId);
         if (!post)
             return res.status(404).json({ message: "Post not found." });
+        // Fetch the user's current profile picture from the database
+        const user = yield user_1.default.findById(userId).select("profilePicUrl");
+        const profilePicUrl = (user === null || user === void 0 ? void 0 : user.profilePicUrl) || "";
         const comment = {
             text,
             userId,
             username,
+            profilePicUrl,
             replies: [],
         };
         post.comments.push(comment);
@@ -490,7 +557,7 @@ app.delete("/community-notes/:postId/comments/:commentId", (req, res) => __await
         const comment = post.comments.id(req.params.commentId);
         if (!comment)
             return res.status(404).json({ message: "Comment not found." });
-        comment.remove();
+        post.comments.pull(req.params.commentId);
         yield post.save();
         res.status(200).json({ comments: post.comments });
     }
@@ -511,7 +578,15 @@ app.post("/community-notes/:postId/comments/:commentId/replies", (req, res) => _
         const comment = post.comments.id(req.params.commentId);
         if (!comment)
             return res.status(404).json({ message: "Comment not found." });
-        comment.replies.push({ text, userId, username });
+        // Fetch the user's current profile picture from the database
+        const user = yield user_1.default.findById(userId).select("profilePicUrl");
+        const profilePicUrl = (user === null || user === void 0 ? void 0 : user.profilePicUrl) || "";
+        comment.replies.push({
+            text,
+            userId,
+            username,
+            profilePicUrl,
+        });
         yield post.save();
         res.status(201).json({ replies: comment.replies });
     }
@@ -552,12 +627,93 @@ app.delete("/community-notes/:postId/comments/:commentId/replies/:replyId", (req
         const reply = comment.replies.id(req.params.replyId);
         if (!reply)
             return res.status(404).json({ message: "Reply not found." });
-        reply.remove();
+        comment.replies.pull(req.params.replyId);
         yield post.save();
         res.status(200).json({ replies: comment.replies });
     }
     catch (error) {
         res.status(500).json({ message: "Failed to delete reply." });
+    }
+}));
+// Toggle like on a post
+app.post("/community-notes/:postId/like", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { userId } = req.body;
+        if (!userId) {
+            return res.status(400).json({ message: "Missing userId." });
+        }
+        const post = yield communityNote_1.default.findById(req.params.postId);
+        if (!post)
+            return res.status(404).json({ message: "Post not found." });
+        const likeIndex = post.likes.indexOf(userId);
+        if (likeIndex === -1) {
+            post.likes.push(userId);
+        }
+        else {
+            post.likes.splice(likeIndex, 1);
+        }
+        yield post.save();
+        res.status(200).json({ likes: post.likes });
+    }
+    catch (error) {
+        res.status(500).json({ message: "Failed to toggle like on post." });
+    }
+}));
+// Toggle like on a comment
+app.post("/community-notes/:postId/comments/:commentId/like", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { userId } = req.body;
+        if (!userId) {
+            return res.status(400).json({ message: "Missing userId." });
+        }
+        const post = yield communityNote_1.default.findById(req.params.postId);
+        if (!post)
+            return res.status(404).json({ message: "Post not found." });
+        const comment = post.comments.id(req.params.commentId);
+        if (!comment)
+            return res.status(404).json({ message: "Comment not found." });
+        const likeIndex = comment.likes.indexOf(userId);
+        if (likeIndex === -1) {
+            comment.likes.push(userId);
+        }
+        else {
+            comment.likes.splice(likeIndex, 1);
+        }
+        yield post.save();
+        res.status(200).json({ likes: comment.likes });
+    }
+    catch (error) {
+        res.status(500).json({ message: "Failed to toggle like on comment." });
+    }
+}));
+// Toggle like on a reply
+app.post("/community-notes/:postId/comments/:commentId/replies/:replyId/like", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { userId } = req.body;
+        if (!userId) {
+            return res.status(400).json({ message: "Missing userId." });
+        }
+        const post = yield communityNote_1.default.findById(req.params.postId);
+        if (!post)
+            return res.status(404).json({ message: "Post not found." });
+        const comment = post.comments.id(req.params.commentId);
+        if (!comment)
+            return res.status(404).json({ message: "Comment not found." });
+        const reply = comment.replies.id(req.params.replyId);
+        if (!reply)
+            return res.status(404).json({ message: "Reply not found." });
+        const likeIndex = reply.likes.indexOf(userId);
+        if (likeIndex === -1) {
+            reply.likes.push(userId);
+        }
+        else {
+            reply.likes.splice(likeIndex, 1);
+        }
+        yield post.save();
+        res.status(200).json({ likes: reply.likes });
+    }
+    catch (error) {
+        res.status(500).json({ message: "Failed to toggle like on reply." });
     }
 }));
 // ==================== END COMMUNITY NOTES ENDPOINTS ====================
