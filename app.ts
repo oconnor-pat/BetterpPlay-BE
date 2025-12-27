@@ -436,20 +436,26 @@ app.put("/events/:id/roster", async (req: Request, res: Response) => {
 
 // ==================== COMMUNITY NOTES ENDPOINTS ====================
 
-// Get all posts (with profile pictures populated from Users collection)
+// Get all posts (with profile pictures and likedByUsernames populated from Users collection)
 app.get("/community-notes", async (req: Request, res: Response) => {
   try {
     const posts = await communityNote.find().lean();
     console.log("📝 Fetched posts count:", posts.length);
 
-    // Collect all unique userIds from posts, comments, and replies
+    // Collect all unique userIds from posts, comments, replies, AND likes
     const userIds = new Set<string>();
     posts.forEach((post: any) => {
       if (post.userId) userIds.add(String(post.userId));
+      // Add post likers
+      post.likes?.forEach((id: string) => userIds.add(String(id)));
       post.comments?.forEach((comment: any) => {
         if (comment.userId) userIds.add(String(comment.userId));
+        // Add comment likers
+        comment.likes?.forEach((id: string) => userIds.add(String(id)));
         comment.replies?.forEach((reply: any) => {
           if (reply.userId) userIds.add(String(reply.userId));
+          // Add reply likers
+          reply.likes?.forEach((id: string) => userIds.add(String(id)));
         });
       });
     });
@@ -465,7 +471,7 @@ app.get("/community-notes", async (req: Request, res: Response) => {
       }
     });
 
-    // Fetch all users and create a lookup map
+    // Fetch all users and create lookup maps
     const users = await User.find({ _id: { $in: objectIds } }).lean();
     console.log(
       "🔍 Found users:",
@@ -476,17 +482,29 @@ app.get("/community-notes", async (req: Request, res: Response) => {
       }))
     );
 
-    const userMap = new Map<string, string>();
+    // Map for profile pictures
+    const userPicMap = new Map<string, string>();
+    // Map for usernames (for likedByUsernames)
+    const userNameMap = new Map<string, string>();
     users.forEach((u: any) => {
-      userMap.set(u._id.toString(), u.profilePicUrl || "");
+      userPicMap.set(u._id.toString(), u.profilePicUrl || "");
+      userNameMap.set(u._id.toString(), u.username || "");
     });
 
-    console.log("🗺️ User map entries:", Object.fromEntries(userMap));
+    console.log("🗺️ User map entries:", Object.fromEntries(userPicMap));
 
-    // Populate profilePicUrl for posts, comments, and replies
+    // Helper function to get likedByUsernames from likes array
+    const getLikedByUsernames = (likes: string[] | undefined): string[] => {
+      if (!likes || likes.length === 0) return [];
+      return likes
+        .map((id) => userNameMap.get(String(id)))
+        .filter((name): name is string => !!name);
+    };
+
+    // Populate profilePicUrl and likedByUsernames for posts, comments, and replies
     const postsWithPhotos = posts.map((post: any) => {
       const postUserId = String(post.userId);
-      const postPic = userMap.get(postUserId) || "";
+      const postPic = userPicMap.get(postUserId) || "";
       console.log(
         `📸 Post by ${post.username} (${postUserId}): pic = ${
           postPic ? "YES" : "NO"
@@ -496,18 +514,21 @@ app.get("/community-notes", async (req: Request, res: Response) => {
       return {
         ...post,
         profilePicUrl: postPic,
+        likedByUsernames: getLikedByUsernames(post.likes),
         comments: post.comments?.map((comment: any) => {
           const commentUserId = String(comment.userId);
-          const commentPic = userMap.get(commentUserId) || "";
+          const commentPic = userPicMap.get(commentUserId) || "";
           return {
             ...comment,
             profilePicUrl: commentPic,
+            likedByUsernames: getLikedByUsernames(comment.likes),
             replies: comment.replies?.map((reply: any) => {
               const replyUserId = String(reply.userId);
-              const replyPic = userMap.get(replyUserId) || "";
+              const replyPic = userPicMap.get(replyUserId) || "";
               return {
                 ...reply,
                 profilePicUrl: replyPic,
+                likedByUsernames: getLikedByUsernames(reply.likes),
               };
             }),
           };
@@ -743,7 +764,26 @@ app.post(
         post.likes.splice(likeIndex, 1);
       }
       await post.save();
-      res.status(200).json({ likes: post.likes });
+
+      // Fetch usernames for all users who liked
+      const likerIds = post.likes.map((id: string) => {
+        try {
+          return new mongoose.Types.ObjectId(id);
+        } catch {
+          return id;
+        }
+      });
+      const likers = await User.find({ _id: { $in: likerIds } })
+        .select("username")
+        .lean();
+      const likedByUsernames = post.likes
+        .map((id: string) => {
+          const user = likers.find((u: any) => u._id.toString() === String(id));
+          return user?.username;
+        })
+        .filter((name: string | undefined): name is string => !!name);
+
+      res.status(200).json({ likes: post.likes, likedByUsernames });
     } catch (error) {
       res.status(500).json({ message: "Failed to toggle like on post." });
     }
@@ -772,7 +812,26 @@ app.post(
         comment.likes.splice(likeIndex, 1);
       }
       await post.save();
-      res.status(200).json({ likes: comment.likes });
+
+      // Fetch usernames for all users who liked
+      const likerIds = comment.likes.map((id: string) => {
+        try {
+          return new mongoose.Types.ObjectId(id);
+        } catch {
+          return id;
+        }
+      });
+      const likers = await User.find({ _id: { $in: likerIds } })
+        .select("username")
+        .lean();
+      const likedByUsernames = comment.likes
+        .map((id: string) => {
+          const user = likers.find((u: any) => u._id.toString() === String(id));
+          return user?.username;
+        })
+        .filter((name: string | undefined): name is string => !!name);
+
+      res.status(200).json({ likes: comment.likes, likedByUsernames });
     } catch (error) {
       res.status(500).json({ message: "Failed to toggle like on comment." });
     }
@@ -803,7 +862,26 @@ app.post(
         reply.likes.splice(likeIndex, 1);
       }
       await post.save();
-      res.status(200).json({ likes: reply.likes });
+
+      // Fetch usernames for all users who liked
+      const likerIds = reply.likes.map((id: string) => {
+        try {
+          return new mongoose.Types.ObjectId(id);
+        } catch {
+          return id;
+        }
+      });
+      const likers = await User.find({ _id: { $in: likerIds } })
+        .select("username")
+        .lean();
+      const likedByUsernames = reply.likes
+        .map((id: string) => {
+          const user = likers.find((u: any) => u._id.toString() === String(id));
+          return user?.username;
+        })
+        .filter((name: string | undefined): name is string => !!name);
+
+      res.status(200).json({ likes: reply.likes, likedByUsernames });
     } catch (error) {
       res.status(500).json({ message: "Failed to toggle like on reply." });
     }

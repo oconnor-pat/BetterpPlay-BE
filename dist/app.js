@@ -383,25 +383,32 @@ app.put("/events/:id/roster", (req, res) => __awaiter(void 0, void 0, void 0, fu
     }
 }));
 // ==================== COMMUNITY NOTES ENDPOINTS ====================
-// Get all posts (with profile pictures populated from Users collection)
+// Get all posts (with profile pictures and likedByUsernames populated from Users collection)
 app.get("/community-notes", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     var _a;
     try {
         const posts = yield communityNote_1.default.find().lean();
         console.log("📝 Fetched posts count:", posts.length);
-        // Collect all unique userIds from posts, comments, and replies
+        // Collect all unique userIds from posts, comments, replies, AND likes
         const userIds = new Set();
         posts.forEach((post) => {
-            var _a;
+            var _a, _b;
             if (post.userId)
                 userIds.add(String(post.userId));
-            (_a = post.comments) === null || _a === void 0 ? void 0 : _a.forEach((comment) => {
-                var _a;
+            // Add post likers
+            (_a = post.likes) === null || _a === void 0 ? void 0 : _a.forEach((id) => userIds.add(String(id)));
+            (_b = post.comments) === null || _b === void 0 ? void 0 : _b.forEach((comment) => {
+                var _a, _b;
                 if (comment.userId)
                     userIds.add(String(comment.userId));
-                (_a = comment.replies) === null || _a === void 0 ? void 0 : _a.forEach((reply) => {
+                // Add comment likers
+                (_a = comment.likes) === null || _a === void 0 ? void 0 : _a.forEach((id) => userIds.add(String(id)));
+                (_b = comment.replies) === null || _b === void 0 ? void 0 : _b.forEach((reply) => {
+                    var _a;
                     if (reply.userId)
                         userIds.add(String(reply.userId));
+                    // Add reply likers
+                    (_a = reply.likes) === null || _a === void 0 ? void 0 : _a.forEach((id) => userIds.add(String(id)));
                 });
             });
         });
@@ -415,32 +422,44 @@ app.get("/community-notes", (req, res) => __awaiter(void 0, void 0, void 0, func
                 return id;
             }
         });
-        // Fetch all users and create a lookup map
+        // Fetch all users and create lookup maps
         const users = yield user_1.default.find({ _id: { $in: objectIds } }).lean();
         console.log("🔍 Found users:", users.map((u) => ({
             id: u._id.toString(),
             username: u.username,
             profilePicUrl: u.profilePicUrl || "NO_PIC",
         })));
-        const userMap = new Map();
+        // Map for profile pictures
+        const userPicMap = new Map();
+        // Map for usernames (for likedByUsernames)
+        const userNameMap = new Map();
         users.forEach((u) => {
-            userMap.set(u._id.toString(), u.profilePicUrl || "");
+            userPicMap.set(u._id.toString(), u.profilePicUrl || "");
+            userNameMap.set(u._id.toString(), u.username || "");
         });
-        console.log("🗺️ User map entries:", Object.fromEntries(userMap));
-        // Populate profilePicUrl for posts, comments, and replies
+        console.log("🗺️ User map entries:", Object.fromEntries(userPicMap));
+        // Helper function to get likedByUsernames from likes array
+        const getLikedByUsernames = (likes) => {
+            if (!likes || likes.length === 0)
+                return [];
+            return likes
+                .map((id) => userNameMap.get(String(id)))
+                .filter((name) => !!name);
+        };
+        // Populate profilePicUrl and likedByUsernames for posts, comments, and replies
         const postsWithPhotos = posts.map((post) => {
             var _a;
             const postUserId = String(post.userId);
-            const postPic = userMap.get(postUserId) || "";
+            const postPic = userPicMap.get(postUserId) || "";
             console.log(`📸 Post by ${post.username} (${postUserId}): pic = ${postPic ? "YES" : "NO"}`);
-            return Object.assign(Object.assign({}, post), { profilePicUrl: postPic, comments: (_a = post.comments) === null || _a === void 0 ? void 0 : _a.map((comment) => {
+            return Object.assign(Object.assign({}, post), { profilePicUrl: postPic, likedByUsernames: getLikedByUsernames(post.likes), comments: (_a = post.comments) === null || _a === void 0 ? void 0 : _a.map((comment) => {
                     var _a;
                     const commentUserId = String(comment.userId);
-                    const commentPic = userMap.get(commentUserId) || "";
-                    return Object.assign(Object.assign({}, comment), { profilePicUrl: commentPic, replies: (_a = comment.replies) === null || _a === void 0 ? void 0 : _a.map((reply) => {
+                    const commentPic = userPicMap.get(commentUserId) || "";
+                    return Object.assign(Object.assign({}, comment), { profilePicUrl: commentPic, likedByUsernames: getLikedByUsernames(comment.likes), replies: (_a = comment.replies) === null || _a === void 0 ? void 0 : _a.map((reply) => {
                             const replyUserId = String(reply.userId);
-                            const replyPic = userMap.get(replyUserId) || "";
-                            return Object.assign(Object.assign({}, reply), { profilePicUrl: replyPic });
+                            const replyPic = userPicMap.get(replyUserId) || "";
+                            return Object.assign(Object.assign({}, reply), { profilePicUrl: replyPic, likedByUsernames: getLikedByUsernames(reply.likes) });
                         }) });
                 }) });
         });
@@ -653,7 +672,25 @@ app.post("/community-notes/:postId/like", (req, res) => __awaiter(void 0, void 0
             post.likes.splice(likeIndex, 1);
         }
         yield post.save();
-        res.status(200).json({ likes: post.likes });
+        // Fetch usernames for all users who liked
+        const likerIds = post.likes.map((id) => {
+            try {
+                return new mongoose_1.default.Types.ObjectId(id);
+            }
+            catch (_a) {
+                return id;
+            }
+        });
+        const likers = yield user_1.default.find({ _id: { $in: likerIds } })
+            .select("username")
+            .lean();
+        const likedByUsernames = post.likes
+            .map((id) => {
+            const user = likers.find((u) => u._id.toString() === String(id));
+            return user === null || user === void 0 ? void 0 : user.username;
+        })
+            .filter((name) => !!name);
+        res.status(200).json({ likes: post.likes, likedByUsernames });
     }
     catch (error) {
         res.status(500).json({ message: "Failed to toggle like on post." });
@@ -680,7 +717,25 @@ app.post("/community-notes/:postId/comments/:commentId/like", (req, res) => __aw
             comment.likes.splice(likeIndex, 1);
         }
         yield post.save();
-        res.status(200).json({ likes: comment.likes });
+        // Fetch usernames for all users who liked
+        const likerIds = comment.likes.map((id) => {
+            try {
+                return new mongoose_1.default.Types.ObjectId(id);
+            }
+            catch (_a) {
+                return id;
+            }
+        });
+        const likers = yield user_1.default.find({ _id: { $in: likerIds } })
+            .select("username")
+            .lean();
+        const likedByUsernames = comment.likes
+            .map((id) => {
+            const user = likers.find((u) => u._id.toString() === String(id));
+            return user === null || user === void 0 ? void 0 : user.username;
+        })
+            .filter((name) => !!name);
+        res.status(200).json({ likes: comment.likes, likedByUsernames });
     }
     catch (error) {
         res.status(500).json({ message: "Failed to toggle like on comment." });
@@ -710,7 +765,25 @@ app.post("/community-notes/:postId/comments/:commentId/replies/:replyId/like", (
             reply.likes.splice(likeIndex, 1);
         }
         yield post.save();
-        res.status(200).json({ likes: reply.likes });
+        // Fetch usernames for all users who liked
+        const likerIds = reply.likes.map((id) => {
+            try {
+                return new mongoose_1.default.Types.ObjectId(id);
+            }
+            catch (_a) {
+                return id;
+            }
+        });
+        const likers = yield user_1.default.find({ _id: { $in: likerIds } })
+            .select("username")
+            .lean();
+        const likedByUsernames = reply.likes
+            .map((id) => {
+            const user = likers.find((u) => u._id.toString() === String(id));
+            return user === null || user === void 0 ? void 0 : user.username;
+        })
+            .filter((name) => !!name);
+        res.status(200).json({ likes: reply.likes, likedByUsernames });
     }
     catch (error) {
         res.status(500).json({ message: "Failed to toggle like on reply." });
