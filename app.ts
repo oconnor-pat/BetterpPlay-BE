@@ -9,6 +9,7 @@ import jwt from "jsonwebtoken";
 import cors from "cors";
 import AWS from "aws-sdk";
 import { body, validationResult } from "express-validator";
+import nodemailer from "nodemailer";
 
 const app: Application = express();
 
@@ -330,9 +331,10 @@ app.post(
         password: hashedPassword,
       });
 
-      const token = jwt.sign({ id: newUser._id }, JWT_SECRET, {
-        expiresIn: "1h",
-      });
+      const token = jwt.sign(
+        { id: newUser._id, tokenVersion: newUser.tokenVersion },
+        JWT_SECRET
+      );
       return res.status(201).json({ success: true, user: newUser, token });
     } catch (error) {
       console.error("Error in /auth/register:", error);
@@ -358,12 +360,267 @@ app.post("/auth/login", async (req: Request, res: Response) => {
       return res.status(401).json({ message: "Incorrect password" });
     }
 
-    const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: "1h" });
+    const token = jwt.sign(
+      { id: user._id, tokenVersion: user.tokenVersion },
+      JWT_SECRET
+    );
     return res.status(200).json({ success: true, user, token });
   } catch (error) {
     return res
       .status(500)
       .json({ message: "Failed to process the login request" });
+  }
+});
+
+// Validate JWT token for persistent sign-in
+app.get("/auth/validate", async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) {
+      return res
+        .status(401)
+        .json({ success: false, message: "No token provided" });
+    }
+
+    const token = authHeader.split(" ")[1];
+    const decoded = jwt.verify(token, JWT_SECRET) as {
+      id: string;
+      tokenVersion?: number;
+    };
+
+    const user = await User.findById(decoded.id).select("-password");
+    if (!user) {
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
+    }
+
+    // Check if token version matches (invalidate old tokens after password change)
+    if (
+      decoded.tokenVersion !== undefined &&
+      decoded.tokenVersion !== user.tokenVersion
+    ) {
+      return res.status(401).json({
+        success: false,
+        message: "Token has been invalidated. Please log in again.",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      user: {
+        _id: user._id,
+        username: user.username,
+        email: user.email,
+        profilePicUrl: user.profilePicUrl,
+      },
+    });
+  } catch (error) {
+    return res
+      .status(401)
+      .json({ success: false, message: "Invalid or expired token" });
+  }
+});
+
+// Change password (invalidates all existing tokens)
+app.put("/auth/change-password", async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) {
+      return res
+        .status(401)
+        .json({ success: false, message: "No token provided" });
+    }
+
+    const token = authHeader.split(" ")[1];
+    const decoded = jwt.verify(token, JWT_SECRET) as { id: string };
+
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: "Current and new password are required",
+      });
+    }
+
+    const user = await User.findById(decoded.id);
+    if (!user) {
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
+    }
+
+    const passwordMatch = await bcrypt.compare(currentPassword, user.password);
+    if (!passwordMatch) {
+      return res
+        .status(401)
+        .json({ success: false, message: "Current password is incorrect" });
+    }
+
+    // Hash new password and increment tokenVersion to invalidate all existing tokens
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    user.password = hashedPassword;
+    user.tokenVersion = (user.tokenVersion || 0) + 1;
+    await user.save();
+
+    // Issue a new token with updated tokenVersion
+    const newToken = jwt.sign(
+      { id: user._id, tokenVersion: user.tokenVersion },
+      JWT_SECRET
+    );
+
+    return res.status(200).json({
+      success: true,
+      message:
+        "Password changed successfully. All other sessions have been logged out.",
+      token: newToken,
+    });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to change password" });
+  }
+});
+
+// Password reset request
+app.post("/auth/forgot-password", async (req: Request, res: Response) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Email is required" });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase() });
+
+    // Always return success to prevent email enumeration attacks
+    if (!user) {
+      return res.status(200).json({
+        success: true,
+        message: "If an account exists, a reset email has been sent",
+      });
+    }
+
+    // Generate reset token (1 hour expiry)
+    const resetToken = jwt.sign(
+      { id: user._id, purpose: "password-reset" },
+      JWT_SECRET,
+      { expiresIn: "1h" }
+    );
+
+    // Configure nodemailer transporter
+    const transporter = nodemailer.createTransport({
+      service: process.env.EMAIL_SERVICE || "gmail",
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASSWORD,
+      },
+    });
+
+    // Build reset link - use FRONTEND_URL or auto-detect from request
+    const baseUrl =
+      process.env.FRONTEND_URL || `${req.protocol}://${req.get("host")}`;
+    const resetLink = `${baseUrl}/reset-password?token=${resetToken}`;
+
+    await transporter.sendMail({
+      from: process.env.EMAIL_USER,
+      to: email,
+      subject: "BetterPlay - Reset Your Password",
+      html: `
+        <h2>Password Reset Request</h2>
+        <p>You requested to reset your password. Click the link below to set a new password:</p>
+        <a href="${resetLink}" style="display: inline-block; padding: 12px 24px; background-color: #4F46E5; color: white; text-decoration: none; border-radius: 6px;">Reset Password</a>
+        <p>This link will expire in 1 hour.</p>
+        <p>If you didn't request this, you can safely ignore this email.</p>
+      `,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "If an account exists, a reset email has been sent",
+    });
+  } catch (error: any) {
+    console.error("Error in forgot-password:", error);
+    console.error("Email error details:", error?.message, error?.code);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// Deep link redirect for password reset (opens the app)
+app.get("/reset-password", (req: Request, res: Response) => {
+  const { token } = req.query;
+
+  // Redirect to the app's deep link
+  const deepLink = `betterplay://reset-password?token=${token}`;
+
+  // HTML page that redirects to the app
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Reset Password - BetterPlay</title>
+      <meta http-equiv="refresh" content="0;url=${deepLink}">
+      <style>
+        body { font-family: -apple-system, sans-serif; text-align: center; padding: 50px; }
+        a { color: #007AFF; }
+      </style>
+    </head>
+    <body>
+      <h2>Redirecting to BetterPlay...</h2>
+      <p>If the app doesn't open automatically, <a href="${deepLink}">tap here</a>.</p>
+    </body>
+    </html>
+  `);
+});
+
+// Reset password with token (API endpoint)
+app.post("/auth/reset-password", async (req: Request, res: Response) => {
+  try {
+    const { token, newPassword } = req.body;
+
+    if (!token || !newPassword) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Token and new password required" });
+    }
+
+    const decoded = jwt.verify(token, JWT_SECRET) as {
+      id: string;
+      purpose: string;
+    };
+
+    if (decoded.purpose !== "password-reset") {
+      return res.status(400).json({ success: false, message: "Invalid token" });
+    }
+
+    const user = await User.findById(decoded.id);
+    if (!user) {
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
+    }
+
+    // Hash new password and invalidate old tokens
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    user.password = hashedPassword;
+    user.tokenVersion = (user.tokenVersion || 0) + 1;
+    await user.save();
+
+    return res
+      .status(200)
+      .json({ success: true, message: "Password reset successful" });
+  } catch (error) {
+    if (error instanceof jwt.TokenExpiredError) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Reset link has expired" });
+    }
+    return res
+      .status(400)
+      .json({ success: false, message: "Invalid or expired token" });
   }
 });
 
