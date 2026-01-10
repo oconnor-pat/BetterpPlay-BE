@@ -624,6 +624,321 @@ app.post("/auth/reset-password", async (req: Request, res: Response) => {
   }
 });
 
+// Get all user data for data portability (GDPR compliance)
+app.get("/auth/user-data", async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) {
+      return res
+        .status(401)
+        .json({ success: false, message: "No token provided" });
+    }
+
+    // Handle different authorization header formats
+    let token = authHeader;
+    if (authHeader.toLowerCase().startsWith("bearer")) {
+      token = authHeader.replace(/^bearer:?\s*/i, "").trim();
+    }
+
+    if (!token || token === "null" || token === "undefined") {
+      return res
+        .status(401)
+        .json({
+          success: false,
+          message: "No valid token provided. Please log in again.",
+        });
+    }
+
+    const decoded = jwt.verify(token, JWT_SECRET) as {
+      id: string;
+      tokenVersion?: number;
+    };
+
+    const user = await User.findById(decoded.id).select("-password");
+    if (!user) {
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
+    }
+
+    // Check if token version matches
+    if (
+      decoded.tokenVersion !== undefined &&
+      decoded.tokenVersion !== user.tokenVersion
+    ) {
+      return res.status(401).json({
+        success: false,
+        message: "Token has been invalidated. Please log in again.",
+      });
+    }
+
+    const userId = user._id.toString();
+    const username = user.username;
+
+    // Fetch all user-related data
+    const [eventsCreated, eventsJoined, communityNotes, userComments] =
+      await Promise.all([
+        // Events created by user
+        Event.find({ createdBy: userId }),
+        // Events user has joined (in roster)
+        Event.find({ "roster.username": username }),
+        // Community notes created by user
+        communityNote.find({ userId: userId }),
+        // Get all community notes where user has commented or replied
+        communityNote.find({
+          $or: [
+            { "comments.userId": userId },
+            { "comments.replies.userId": userId },
+          ],
+        }),
+      ]);
+
+    // Extract user's comments and replies from community notes
+    const userCommentsAndReplies: any[] = [];
+    userComments.forEach((note: any) => {
+      note.comments?.forEach((comment: any) => {
+        if (comment.userId === userId) {
+          userCommentsAndReplies.push({
+            type: "comment",
+            noteId: note._id,
+            commentId: comment._id,
+            text: comment.text,
+            createdAt: comment.createdAt,
+            likes: comment.likes?.length || 0,
+          });
+        }
+        comment.replies?.forEach((reply: any) => {
+          if (reply.userId === userId) {
+            userCommentsAndReplies.push({
+              type: "reply",
+              noteId: note._id,
+              commentId: comment._id,
+              replyId: reply._id,
+              text: reply.text,
+              createdAt: reply.createdAt,
+              likes: reply.likes?.length || 0,
+            });
+          }
+        });
+      });
+    });
+
+    // Compile all user data
+    const userData = {
+      exportDate: new Date().toISOString(),
+      profile: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        username: user.username,
+        profilePicUrl: user.profilePicUrl,
+        createdAt: (user as any).createdAt,
+        updatedAt: (user as any).updatedAt,
+      },
+      eventsCreated: eventsCreated.map((event: any) => ({
+        id: event._id,
+        name: event.name,
+        location: event.location,
+        date: event.date,
+        time: event.time,
+        eventType: event.eventType,
+        totalSpots: event.totalSpots,
+        rosterSpotsFilled: event.rosterSpotsFilled,
+        roster: event.roster,
+        createdAt: event.createdAt,
+      })),
+      eventsJoined: eventsJoined
+        .filter((event: any) => event.createdBy !== userId) // Exclude events they created
+        .map((event: any) => ({
+          id: event._id,
+          name: event.name,
+          location: event.location,
+          date: event.date,
+          time: event.time,
+          eventType: event.eventType,
+          createdBy: event.createdByUsername,
+          joinedAt: event.roster?.find((p: any) => p.username === username),
+        })),
+      communityPosts: communityNotes.map((note: any) => ({
+        id: note._id,
+        text: note.text,
+        likes: note.likes?.length || 0,
+        commentsCount: note.comments?.length || 0,
+        createdAt: note.createdAt,
+        updatedAt: note.updatedAt,
+      })),
+      commentsAndReplies: userCommentsAndReplies,
+      statistics: {
+        totalEventsCreated: eventsCreated.length,
+        totalEventsJoined: eventsJoined.filter(
+          (e: any) => e.createdBy !== userId
+        ).length,
+        totalCommunityPosts: communityNotes.length,
+        totalComments: userCommentsAndReplies.filter(
+          (c) => c.type === "comment"
+        ).length,
+        totalReplies: userCommentsAndReplies.filter((c) => c.type === "reply")
+          .length,
+      },
+    };
+
+    return res.status(200).json({
+      success: true,
+      data: userData,
+    });
+  } catch (error) {
+    console.error("Error fetching user data:", error);
+    if (error instanceof jwt.JsonWebTokenError) {
+      return res
+        .status(401)
+        .json({ success: false, message: "Invalid or expired token" });
+    }
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to fetch user data" });
+  }
+});
+
+// Delete user account and all associated data (Apple Guideline 5.1.1(v) compliance)
+app.delete("/auth/delete-account", async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    console.log("Delete account - Auth header:", authHeader);
+
+    if (!authHeader) {
+      return res
+        .status(401)
+        .json({ success: false, message: "No token provided" });
+    }
+
+    // Handle different authorization header formats
+    // "Bearer <token>", "Bearer: <token>", or just "<token>"
+    let token = authHeader;
+    if (authHeader.toLowerCase().startsWith("bearer")) {
+      // Remove "Bearer " or "Bearer: " prefix
+      token = authHeader.replace(/^bearer:?\s*/i, "").trim();
+    }
+
+    console.log(
+      "Delete account - Extracted token (first 20 chars):",
+      token.substring(0, 20)
+    );
+
+    // Check for null/undefined token (frontend bug)
+    if (!token || token === "null" || token === "undefined") {
+      return res
+        .status(401)
+        .json({
+          success: false,
+          message: "No valid token provided. Please log in again.",
+        });
+    }
+
+    const decoded = jwt.verify(token, JWT_SECRET) as {
+      id: string;
+      tokenVersion?: number;
+    };
+
+    const user = await User.findById(decoded.id);
+    if (!user) {
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
+    }
+
+    // Check if token version matches
+    if (
+      decoded.tokenVersion !== undefined &&
+      decoded.tokenVersion !== user.tokenVersion
+    ) {
+      return res.status(401).json({
+        success: false,
+        message: "Token has been invalidated. Please log in again.",
+      });
+    }
+
+    const userId = user._id.toString();
+    const username = user.username;
+
+    // 1. Delete user's profile picture from S3 (if exists)
+    if (user.profilePicUrl) {
+      try {
+        // Extract the S3 key from the URL
+        const url = new URL(user.profilePicUrl);
+        const key = url.pathname.substring(1); // Remove leading '/'
+        await s3
+          .deleteObject({
+            Bucket: process.env.AWS_S3_BUCKET_NAME || "",
+            Key: key,
+          })
+          .promise();
+      } catch (s3Error) {
+        console.error("Error deleting profile picture from S3:", s3Error);
+        // Continue with account deletion even if S3 deletion fails
+      }
+    }
+
+    // 2. Delete all events created by the user
+    await Event.deleteMany({ createdBy: userId });
+
+    // 3. Remove user from any event rosters they joined
+    await Event.updateMany(
+      { "roster.username": username },
+      {
+        $pull: { roster: { username: username } },
+        $inc: { rosterSpotsFilled: -1 },
+      }
+    );
+
+    // 4. Delete all community notes created by the user
+    await communityNote.deleteMany({ userId: userId });
+
+    // 5. Remove user's comments from community notes
+    await communityNote.updateMany(
+      { "comments.userId": userId },
+      { $pull: { comments: { userId: userId } } }
+    );
+
+    // 6. Remove user's replies from comments in community notes
+    await communityNote.updateMany(
+      { "comments.replies.userId": userId },
+      { $pull: { "comments.$[].replies": { userId: userId } } }
+    );
+
+    // 7. Remove user's likes from community notes, comments, and replies
+    await communityNote.updateMany(
+      { likes: userId },
+      { $pull: { likes: userId } }
+    );
+    await communityNote.updateMany(
+      { "comments.likes": userId },
+      { $pull: { "comments.$[].likes": userId } }
+    );
+    await communityNote.updateMany(
+      { "comments.replies.likes": userId },
+      { $pull: { "comments.$[].replies.$[].likes": userId } }
+    );
+
+    // 8. Delete the user account
+    await User.findByIdAndDelete(userId);
+
+    return res.status(200).json({
+      success: true,
+      message: "Account and all associated data have been permanently deleted.",
+    });
+  } catch (error) {
+    console.error("Error deleting account:", error);
+    if (error instanceof jwt.JsonWebTokenError) {
+      return res
+        .status(401)
+        .json({ success: false, message: "Invalid or expired token" });
+    }
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to delete account" });
+  }
+});
+
 // User API to get all users (excluding passwords)
 app.get("/users", async (req: Request, res: Response) => {
   try {
