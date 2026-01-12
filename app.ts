@@ -4,6 +4,9 @@ import bcrypt from "bcrypt";
 import User, { IUser } from "./models/user";
 import Event from "./models/event";
 import communityNote from "./models/communityNote";
+import Venue from "./models/venue";
+import Booking from "./models/booking";
+import Inquiry from "./models/inquiry";
 import dotenv from "dotenv";
 import jwt from "jsonwebtoken";
 import cors from "cors";
@@ -55,6 +58,30 @@ app.use(async (req: Request, res: Response, next: Function) => {
   }
   next();
 });
+
+// Admin middleware - use this to protect admin-only routes
+const requireAdmin = async (req: Request, res: Response, next: Function) => {
+  try {
+    const user = (req as any).user;
+    if (!user || !user.id) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+
+    const dbUser = await User.findById(user.id);
+    if (!dbUser) {
+      return res.status(401).json({ message: "User not found" });
+    }
+
+    if (!dbUser.isAdmin) {
+      return res.status(403).json({ message: "Admin access required" });
+    }
+
+    next();
+  } catch (error) {
+    console.error("Admin auth error:", error);
+    return res.status(500).json({ message: "Authentication error" });
+  }
+};
 
 // Check server availability
 app.get("/check", (req: Request, res: Response) => {
@@ -287,6 +314,560 @@ app.delete("/events/:id", async (req: Request, res: Response) => {
 });
 
 // ==================== END EVENT ENDPOINTS ====================
+
+// ==================== VENUE ENDPOINTS ====================
+
+// Get all venues (with optional filters)
+app.get("/api/venues", async (req: Request, res: Response) => {
+  try {
+    const { type, city, state, isActive } = req.query;
+
+    // Build filter object
+    const filter: any = {};
+
+    if (type) filter.type = type;
+    if (city) filter["address.city"] = { $regex: city, $options: "i" };
+    if (state) filter["address.state"] = state;
+    if (isActive !== undefined) filter.isActive = isActive === "true";
+
+    const venues = await Venue.find(filter).sort({ name: 1 });
+    res.status(200).json(venues);
+  } catch (error) {
+    console.error("Error fetching venues:", error);
+    res.status(500).json({ message: "Failed to fetch venues" });
+  }
+});
+
+// Get a single venue by ID
+app.get("/api/venues/:id", async (req: Request, res: Response) => {
+  try {
+    const venue = await Venue.findById(req.params.id);
+    if (!venue) {
+      return res.status(404).json({ message: "Venue not found" });
+    }
+    res.status(200).json(venue);
+  } catch (error) {
+    console.error("Error fetching venue:", error);
+    res.status(500).json({ message: "Failed to fetch venue" });
+  }
+});
+
+// Get sub-venues for a specific venue
+app.get("/api/venues/:id/subvenues", async (req: Request, res: Response) => {
+  try {
+    const venue = await Venue.findById(req.params.id);
+    if (!venue) {
+      return res.status(404).json({ message: "Venue not found" });
+    }
+    res.status(200).json(venue.subVenues);
+  } catch (error) {
+    console.error("Error fetching sub-venues:", error);
+    res.status(500).json({ message: "Failed to fetch sub-venues" });
+  }
+});
+
+// Check if current user is admin
+app.get("/api/user/isAdmin", async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    if (!user || !user.id) {
+      return res.status(200).json({ isAdmin: false });
+    }
+
+    const dbUser = await User.findById(user.id);
+    if (!dbUser) {
+      return res.status(200).json({ isAdmin: false });
+    }
+
+    res.status(200).json({ isAdmin: dbUser.isAdmin || false });
+  } catch (error) {
+    console.error("Error checking admin status:", error);
+    res.status(200).json({ isAdmin: false });
+  }
+});
+
+// Create a new venue (admin only)
+app.post("/api/venues", requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const {
+      name,
+      type,
+      address,
+      coordinates,
+      subVenues,
+      amenities,
+      contactEmail,
+      contactPhone,
+      website,
+      imageUrl,
+      operatingHours,
+    } = req.body;
+
+    if (!name || !type || !address || !coordinates) {
+      return res.status(400).json({
+        message: "Missing required fields: name, type, address, coordinates",
+      });
+    }
+
+    const newVenue = await Venue.create({
+      name,
+      type,
+      address,
+      coordinates,
+      subVenues: subVenues || [],
+      amenities: amenities || [],
+      contactEmail,
+      contactPhone,
+      website,
+      imageUrl,
+      operatingHours,
+      isActive: true,
+    });
+
+    res.status(201).json(newVenue);
+  } catch (error) {
+    console.error("Error creating venue:", error);
+    res.status(500).json({ message: "Failed to create venue" });
+  }
+});
+
+// Update a venue (admin only)
+app.put(
+  "/api/venues/:id",
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const venueId = req.params.id;
+      const venue = await Venue.findById(venueId);
+
+      if (!venue) {
+        return res.status(404).json({ message: "Venue not found" });
+      }
+
+      const updateFields = [
+        "name",
+        "type",
+        "address",
+        "coordinates",
+        "subVenues",
+        "amenities",
+        "contactEmail",
+        "contactPhone",
+        "website",
+        "imageUrl",
+        "operatingHours",
+        "isActive",
+      ];
+
+      updateFields.forEach((field) => {
+        if (req.body[field] !== undefined) {
+          (venue as any)[field] = req.body[field];
+        }
+      });
+
+      await venue.save();
+      res.status(200).json(venue);
+    } catch (error) {
+      console.error("Error updating venue:", error);
+      res.status(500).json({ message: "Failed to update venue" });
+    }
+  }
+);
+
+// Delete a venue (admin only)
+app.delete(
+  "/api/venues/:id",
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const venueId = req.params.id;
+      const venue = await Venue.findById(venueId);
+
+      if (!venue) {
+        return res.status(404).json({ message: "Venue not found" });
+      }
+
+      await Venue.findByIdAndDelete(venueId);
+      res.sendStatus(204);
+    } catch (error) {
+      console.error("Error deleting venue:", error);
+      res.status(500).json({ message: "Failed to delete venue" });
+    }
+  }
+);
+
+// ==================== END VENUE ENDPOINTS ====================
+
+// ==================== BOOKING ENDPOINTS ====================
+
+// Helper function to generate time slots for a day
+const generateTimeSlots = (
+  date: string,
+  operatingHours: { open: string; close: string } | null,
+  existingBookings: any[]
+) => {
+  if (!operatingHours) {
+    return []; // Venue closed on this day
+  }
+
+  const slots: any[] = [];
+  const [openHour] = operatingHours.open.split(":").map(Number);
+  const [closeHour] = operatingHours.close.split(":").map(Number);
+
+  // Generate hourly slots
+  for (let hour = openHour; hour < closeHour; hour++) {
+    const startTime = `${hour.toString().padStart(2, "0")}:00`;
+    const endTime = `${(hour + 1).toString().padStart(2, "0")}:00`;
+
+    // Find if this slot is booked
+    const booking = existingBookings.find(
+      (b) =>
+        b.date === date && b.startTime === startTime && b.status !== "cancelled"
+    );
+
+    slots.push({
+      id: `${date}-${startTime}`,
+      date,
+      startTime,
+      endTime,
+      available: !booking,
+      price: 150, // Default price - can be made dynamic later
+      eventName: booking?.eventName || null, // Include event name if booked
+      bookedBy: booking?.userName || null, // Include who booked it
+    });
+  }
+
+  return slots;
+};
+
+// Get available time slots for a space
+app.get(
+  "/api/venues/:venueId/spaces/:spaceId/timeslots",
+  async (req: Request, res: Response) => {
+    try {
+      const { venueId, spaceId } = req.params;
+      const { date } = req.query; // Optional: specific date (YYYY-MM-DD)
+
+      const venue = await Venue.findById(venueId);
+      if (!venue) {
+        return res.status(404).json({ message: "Venue not found" });
+      }
+
+      const space = venue.subVenues.find((s) => s.id === spaceId);
+      if (!space) {
+        return res.status(404).json({ message: "Space not found" });
+      }
+
+      // Get dates to generate slots for (next 14 days if no specific date)
+      const dates: string[] = [];
+      if (date) {
+        dates.push(date as string);
+      } else {
+        for (let i = 0; i < 14; i++) {
+          const d = new Date();
+          d.setDate(d.getDate() + i);
+          dates.push(d.toISOString().split("T")[0]);
+        }
+      }
+
+      // Get existing bookings for this space
+      const existingBookings = await Booking.find({
+        venueId,
+        spaceId,
+        date: { $in: dates },
+        status: { $ne: "cancelled" },
+      });
+
+      // Generate time slots for each date
+      const allSlots: any[] = [];
+      const dayNames = [
+        "sunday",
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+      ];
+
+      for (const dateStr of dates) {
+        const dayOfWeek = new Date(dateStr).getDay();
+        const dayName = dayNames[
+          dayOfWeek
+        ] as keyof typeof venue.operatingHours;
+        const hours = venue.operatingHours?.[dayName] || null;
+
+        const slots = generateTimeSlots(dateStr, hours, existingBookings);
+        allSlots.push(...slots);
+      }
+
+      res.status(200).json({
+        venueId,
+        spaceId,
+        spaceName: space.name,
+        slots: allSlots,
+      });
+    } catch (error) {
+      console.error("Error fetching time slots:", error);
+      res.status(500).json({ message: "Failed to fetch time slots" });
+    }
+  }
+);
+
+// Book a time slot
+app.post(
+  "/api/venues/:venueId/spaces/:spaceId/book",
+  async (req: Request, res: Response) => {
+    try {
+      const { venueId, spaceId } = req.params;
+      const { date, startTime, endTime, eventName, notes } = req.body;
+      const user = (req as any).user;
+
+      if (!user || !user.id) {
+        return res.status(401).json({ message: "Authentication required" });
+      }
+
+      if (!date || !startTime || !endTime || !eventName) {
+        return res.status(400).json({
+          message:
+            "Missing required fields: date, startTime, endTime, eventName",
+        });
+      }
+
+      // Verify venue and space exist
+      const venue = await Venue.findById(venueId);
+      if (!venue) {
+        return res.status(404).json({ message: "Venue not found" });
+      }
+
+      const space = venue.subVenues.find((s) => s.id === spaceId);
+      if (!space) {
+        return res.status(404).json({ message: "Space not found" });
+      }
+
+      // Get user details
+      const dbUser = await User.findById(user.id);
+      if (!dbUser) {
+        return res.status(401).json({ message: "User not found" });
+      }
+
+      // Check if slot is already booked
+      const existingBooking = await Booking.findOne({
+        venueId,
+        spaceId,
+        date,
+        startTime,
+        status: { $ne: "cancelled" },
+      });
+
+      if (existingBooking) {
+        return res
+          .status(409)
+          .json({ message: "This time slot is already booked" });
+      }
+
+      // Create the booking
+      const booking = await Booking.create({
+        venueId,
+        spaceId,
+        spaceName: space.name,
+        userId: user.id,
+        userName: dbUser.name || dbUser.username,
+        userEmail: dbUser.email,
+        eventName,
+        date,
+        startTime,
+        endTime,
+        status: "pending",
+        notes,
+      });
+
+      res.status(201).json({
+        message: "Booking created successfully",
+        booking,
+      });
+    } catch (error: any) {
+      console.error("Error creating booking:", error);
+      if (error.code === 11000) {
+        return res
+          .status(409)
+          .json({ message: "This time slot is already booked" });
+      }
+      res.status(500).json({ message: "Failed to create booking" });
+    }
+  }
+);
+
+// Send an inquiry about a space
+app.post(
+  "/api/venues/:venueId/spaces/:spaceId/inquire",
+  async (req: Request, res: Response) => {
+    try {
+      const { venueId, spaceId } = req.params;
+      const { message, preferredDate, preferredTime, phone } = req.body;
+      const user = (req as any).user;
+
+      if (!user || !user.id) {
+        return res.status(401).json({ message: "Authentication required" });
+      }
+
+      if (!message) {
+        return res.status(400).json({ message: "Message is required" });
+      }
+
+      // Verify venue and space exist
+      const venue = await Venue.findById(venueId);
+      if (!venue) {
+        return res.status(404).json({ message: "Venue not found" });
+      }
+
+      const space = venue.subVenues.find((s) => s.id === spaceId);
+      if (!space) {
+        return res.status(404).json({ message: "Space not found" });
+      }
+
+      // Get user details
+      const dbUser = await User.findById(user.id);
+      if (!dbUser) {
+        return res.status(401).json({ message: "User not found" });
+      }
+
+      // Create the inquiry
+      const inquiry = await Inquiry.create({
+        venueId,
+        spaceId,
+        spaceName: space.name,
+        userId: user.id,
+        userName: dbUser.name || dbUser.username,
+        userEmail: dbUser.email,
+        userPhone: phone,
+        preferredDate,
+        preferredTime,
+        message,
+        status: "new",
+      });
+
+      // TODO: Send email notification to venue contact
+
+      res.status(201).json({
+        message: "Inquiry sent successfully",
+        inquiry,
+      });
+    } catch (error) {
+      console.error("Error creating inquiry:", error);
+      res.status(500).json({ message: "Failed to send inquiry" });
+    }
+  }
+);
+
+// Get user's bookings
+app.get("/api/bookings/my", async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    if (!user || !user.id) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+
+    const bookings = await Booking.find({ userId: user.id })
+      .populate("venueId", "name address")
+      .sort({ date: -1, startTime: -1 });
+
+    res.status(200).json(bookings);
+  } catch (error) {
+    console.error("Error fetching bookings:", error);
+    res.status(500).json({ message: "Failed to fetch bookings" });
+  }
+});
+
+// Cancel a booking
+app.patch("/api/bookings/:id/cancel", async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    if (!user || !user.id) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+
+    const booking = await Booking.findById(req.params.id);
+    if (!booking) {
+      return res.status(404).json({ message: "Booking not found" });
+    }
+
+    // Only allow user to cancel their own booking (or admin)
+    if (booking.userId.toString() !== user.id) {
+      const dbUser = await User.findById(user.id);
+      if (!dbUser?.isAdmin) {
+        return res
+          .status(403)
+          .json({ message: "Not authorized to cancel this booking" });
+      }
+    }
+
+    booking.status = "cancelled";
+    await booking.save();
+
+    res.status(200).json({ message: "Booking cancelled", booking });
+  } catch (error) {
+    console.error("Error cancelling booking:", error);
+    res.status(500).json({ message: "Failed to cancel booking" });
+  }
+});
+
+// Admin: Get all bookings for a venue
+app.get(
+  "/api/venues/:venueId/bookings",
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const { venueId } = req.params;
+      const { date, status } = req.query;
+
+      const filter: any = { venueId };
+      if (date) filter.date = date;
+      if (status) filter.status = status;
+
+      const bookings = await Booking.find(filter).sort({
+        date: 1,
+        startTime: 1,
+      });
+
+      res.status(200).json(bookings);
+    } catch (error) {
+      console.error("Error fetching venue bookings:", error);
+      res.status(500).json({ message: "Failed to fetch bookings" });
+    }
+  }
+);
+
+// Admin: Update booking status
+app.patch(
+  "/api/bookings/:id/status",
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const { status } = req.body;
+      if (!status || !["pending", "confirmed", "cancelled"].includes(status)) {
+        return res.status(400).json({ message: "Invalid status" });
+      }
+
+      const booking = await Booking.findByIdAndUpdate(
+        req.params.id,
+        { status },
+        { new: true }
+      );
+
+      if (!booking) {
+        return res.status(404).json({ message: "Booking not found" });
+      }
+
+      res.status(200).json(booking);
+    } catch (error) {
+      console.error("Error updating booking status:", error);
+      res.status(500).json({ message: "Failed to update booking" });
+    }
+  }
+);
+
+// ==================== END BOOKING ENDPOINTS ====================
 
 // User API to register account
 app.post(
@@ -641,12 +1222,10 @@ app.get("/auth/user-data", async (req: Request, res: Response) => {
     }
 
     if (!token || token === "null" || token === "undefined") {
-      return res
-        .status(401)
-        .json({
-          success: false,
-          message: "No valid token provided. Please log in again.",
-        });
+      return res.status(401).json({
+        success: false,
+        message: "No valid token provided. Please log in again.",
+      });
     }
 
     const decoded = jwt.verify(token, JWT_SECRET) as {
@@ -826,12 +1405,10 @@ app.delete("/auth/delete-account", async (req: Request, res: Response) => {
 
     // Check for null/undefined token (frontend bug)
     if (!token || token === "null" || token === "undefined") {
-      return res
-        .status(401)
-        .json({
-          success: false,
-          message: "No valid token provided. Please log in again.",
-        });
+      return res.status(401).json({
+        success: false,
+        message: "No valid token provided. Please log in again.",
+      });
     }
 
     const decoded = jwt.verify(token, JWT_SECRET) as {

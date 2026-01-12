@@ -7,6 +7,7 @@ export interface IUser extends Document {
   password: string;
   profilePicUrl: string;
   tokenVersion: number;
+  isAdmin: boolean;
 }
 
 const UserSchema: Schema = new Schema(
@@ -17,6 +18,7 @@ const UserSchema: Schema = new Schema(
     password: { type: String, required: true },
     profilePicUrl: { type: String }, // URL of the user's profile picture stored in S3
     tokenVersion: { type: Number, default: 0 }, // Increment to invalidate all tokens
+    isAdmin: { type: Boolean, default: false }, // Admin flag for venue management
   },
   { timestamps: true }
 );
