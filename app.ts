@@ -7,6 +7,7 @@ import communityNote from "./models/communityNote";
 import Venue from "./models/venue";
 import Booking from "./models/booking";
 import Inquiry from "./models/inquiry";
+import TimeSlot from "./models/timeSlot";
 import dotenv from "dotenv";
 import jwt from "jsonwebtoken";
 import cors from "cors";
@@ -500,24 +501,71 @@ app.delete(
 
 // ==================== BOOKING ENDPOINTS ====================
 
-// Helper function to generate time slots for a day
+// Helper function to parse time string (supports both "14:00" and "2:00 PM" formats)
+const parseTimeString = (timeStr: string): { hour: number; minute: number } => {
+  // Check if it's AM/PM format
+  const isPM = timeStr.toLowerCase().includes("pm");
+  const isAM = timeStr.toLowerCase().includes("am");
+
+  // Remove AM/PM suffix and trim
+  const cleanTime = timeStr.replace(/\s*(am|pm)\s*/gi, "").trim();
+  const [hourStr, minStr] = cleanTime.split(":");
+  let hour = parseInt(hourStr, 10);
+  const minute = parseInt(minStr, 10) || 0;
+
+  // Convert to 24-hour format if AM/PM
+  if (isPM && hour !== 12) {
+    hour += 12; // 1 PM -> 13, 11 PM -> 23
+  } else if (isAM && hour === 12) {
+    hour = 0; // 12 AM -> 0
+  }
+
+  return { hour, minute };
+};
+
+// Helper function to generate time slots for a day (auto-generated from operating hours)
 const generateTimeSlots = (
   date: string,
   operatingHours: { open: string; close: string } | null,
-  existingBookings: any[]
+  existingBookings: any[],
+  customSlots: any[] // Custom slots that override auto-generation
 ) => {
   if (!operatingHours) {
     return []; // Venue closed on this day
   }
 
   const slots: any[] = [];
-  const [openHour] = operatingHours.open.split(":").map(Number);
-  const [closeHour] = operatingHours.close.split(":").map(Number);
+
+  // Parse opening time - round UP to next hour if minutes > 0
+  const openTime = parseTimeString(operatingHours.open);
+  const effectiveOpenHour =
+    openTime.minute > 0 ? openTime.hour + 1 : openTime.hour;
+
+  // Parse closing time - round DOWN to current hour (can't book partial last hour)
+  const closeTime = parseTimeString(operatingHours.close);
+  const closeHour = closeTime.hour;
 
   // Generate hourly slots
-  for (let hour = openHour; hour < closeHour; hour++) {
+  for (let hour = effectiveOpenHour; hour < closeHour; hour++) {
     const startTime = `${hour.toString().padStart(2, "0")}:00`;
     const endTime = `${(hour + 1).toString().padStart(2, "0")}:00`;
+
+    // Skip if there's a custom slot that overlaps this time
+    const hasCustomOverlap = customSlots.some((cs) => {
+      const csStart =
+        parseInt(cs.startTime.split(":")[0]) * 60 +
+        parseInt(cs.startTime.split(":")[1]);
+      const csEnd =
+        parseInt(cs.endTime.split(":")[0]) * 60 +
+        parseInt(cs.endTime.split(":")[1]);
+      const autoStart = hour * 60;
+      const autoEnd = (hour + 1) * 60;
+      return cs.date === date && csStart < autoEnd && csEnd > autoStart;
+    });
+
+    if (hasCustomOverlap) {
+      continue; // Skip auto-generated slot if custom slot exists for this time
+    }
 
     // Find if this slot is booked
     const booking = existingBookings.find(
@@ -533,7 +581,10 @@ const generateTimeSlots = (
       available: !booking,
       price: 150, // Default price - can be made dynamic later
       eventName: booking?.eventName || null, // Include event name if booked
-      bookedBy: booking?.userName || null, // Include who booked it
+      bookedBy: booking?.userId || null, // User ID for ownership comparison
+      bookedByUsername: booking?.userName || null, // Username for display
+      bookingId: booking?._id?.toString() || null, // Booking ID for cancellation
+      isCustom: false,
     });
   }
 
@@ -546,7 +597,7 @@ app.get(
   async (req: Request, res: Response) => {
     try {
       const { venueId, spaceId } = req.params;
-      const { date } = req.query; // Optional: specific date (YYYY-MM-DD)
+      const { date, startDate, endDate } = req.query; // Support single date OR date range
 
       const venue = await Venue.findById(venueId);
       if (!venue) {
@@ -558,11 +609,20 @@ app.get(
         return res.status(404).json({ message: "Space not found" });
       }
 
-      // Get dates to generate slots for (next 14 days if no specific date)
+      // Get dates to generate slots for
       const dates: string[] = [];
-      if (date) {
+      if (startDate && endDate) {
+        // Date range query - generate all dates between start and end
+        const start = new Date(startDate as string);
+        const end = new Date(endDate as string);
+        for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+          dates.push(d.toISOString().split("T")[0]);
+        }
+      } else if (date) {
+        // Single date query
         dates.push(date as string);
       } else {
+        // Default: next 14 days
         for (let i = 0; i < 14; i++) {
           const d = new Date();
           d.setDate(d.getDate() + i);
@@ -576,6 +636,14 @@ app.get(
         spaceId,
         date: { $in: dates },
         status: { $ne: "cancelled" },
+      });
+
+      // Get custom time slots created by admins
+      const customSlots = await TimeSlot.find({
+        venueId,
+        spaceId,
+        date: { $in: dates },
+        isActive: true,
       });
 
       // Generate time slots for each date
@@ -597,9 +665,50 @@ app.get(
         ] as keyof typeof venue.operatingHours;
         const hours = venue.operatingHours?.[dayName] || null;
 
-        const slots = generateTimeSlots(dateStr, hours, existingBookings);
-        allSlots.push(...slots);
+        // Get custom slots for this date
+        const customSlotsForDate = customSlots.filter(
+          (cs) => cs.date === dateStr
+        );
+
+        // Generate auto slots (excluding times covered by custom slots)
+        const autoSlots = generateTimeSlots(
+          dateStr,
+          hours,
+          existingBookings,
+          customSlotsForDate
+        );
+        allSlots.push(...autoSlots);
+
+        // Add custom slots with booking status
+        for (const customSlot of customSlotsForDate) {
+          const booking = existingBookings.find(
+            (b) =>
+              b.date === dateStr &&
+              b.startTime === customSlot.startTime &&
+              b.status !== "cancelled"
+          );
+
+          allSlots.push({
+            id: customSlot._id.toString(),
+            date: customSlot.date,
+            startTime: customSlot.startTime,
+            endTime: customSlot.endTime,
+            available: !booking,
+            price: customSlot.price,
+            eventName: booking?.eventName || null,
+            bookedBy: booking?.userId || null, // User ID for ownership comparison
+            bookedByUsername: booking?.userName || null, // Username for display
+            bookingId: booking?._id?.toString() || null, // Booking ID for cancellation
+            isCustom: true,
+          });
+        }
       }
+
+      // Sort slots by date and start time
+      allSlots.sort((a, b) => {
+        if (a.date !== b.date) return a.date.localeCompare(b.date);
+        return a.startTime.localeCompare(b.startTime);
+      });
 
       res.status(200).json({
         venueId,
@@ -610,6 +719,419 @@ app.get(
     } catch (error) {
       console.error("Error fetching time slots:", error);
       res.status(500).json({ message: "Failed to fetch time slots" });
+    }
+  }
+);
+
+// ==================== ADMIN SLOT MANAGEMENT ====================
+
+// Helper function to check for overlapping slots
+const checkSlotOverlap = async (
+  venueId: string,
+  spaceId: string,
+  date: string,
+  startTime: string,
+  endTime: string,
+  excludeSlotId?: string
+): Promise<boolean> => {
+  const startMinutes =
+    parseInt(startTime.split(":")[0]) * 60 + parseInt(startTime.split(":")[1]);
+  const endMinutes =
+    parseInt(endTime.split(":")[0]) * 60 + parseInt(endTime.split(":")[1]);
+
+  const existingSlots = await TimeSlot.find({
+    venueId,
+    spaceId,
+    date,
+    isActive: true,
+    ...(excludeSlotId ? { _id: { $ne: excludeSlotId } } : {}),
+  });
+
+  for (const slot of existingSlots) {
+    const slotStart =
+      parseInt(slot.startTime.split(":")[0]) * 60 +
+      parseInt(slot.startTime.split(":")[1]);
+    const slotEnd =
+      parseInt(slot.endTime.split(":")[0]) * 60 +
+      parseInt(slot.endTime.split(":")[1]);
+
+    // Check for overlap
+    if (startMinutes < slotEnd && endMinutes > slotStart) {
+      return true; // Overlap found
+    }
+  }
+
+  return false; // No overlap
+};
+
+// Create a new custom time slot (Admin only)
+app.post(
+  "/api/venues/:venueId/spaces/:spaceId/slots",
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const { venueId, spaceId } = req.params;
+      const { date, startTime, endTime, price } = req.body;
+      const user = (req as any).user;
+
+      // Validate required fields
+      if (!date || !startTime || !endTime) {
+        return res.status(400).json({
+          message: "Missing required fields: date, startTime, endTime",
+        });
+      }
+
+      // Validate time format (HH:MM)
+      const timeRegex = /^([01]?[0-9]|2[0-3]):[0-5][0-9]$/;
+      if (!timeRegex.test(startTime) || !timeRegex.test(endTime)) {
+        return res.status(400).json({
+          message: "Invalid time format. Use HH:MM (24-hour format)",
+        });
+      }
+
+      // Validate end time is after start time
+      const startMinutes =
+        parseInt(startTime.split(":")[0]) * 60 +
+        parseInt(startTime.split(":")[1]);
+      const endMinutes =
+        parseInt(endTime.split(":")[0]) * 60 + parseInt(endTime.split(":")[1]);
+      if (endMinutes <= startMinutes) {
+        return res.status(400).json({
+          message: "End time must be after start time",
+        });
+      }
+
+      // Verify venue and space exist
+      const venue = await Venue.findById(venueId);
+      if (!venue) {
+        return res.status(404).json({ message: "Venue not found" });
+      }
+
+      const space = venue.subVenues.find((s) => s.id === spaceId);
+      if (!space) {
+        return res.status(404).json({ message: "Space not found" });
+      }
+
+      // Check for overlapping slots
+      const hasOverlap = await checkSlotOverlap(
+        venueId,
+        spaceId,
+        date,
+        startTime,
+        endTime
+      );
+      if (hasOverlap) {
+        return res.status(409).json({
+          message: "This time slot overlaps with an existing slot",
+        });
+      }
+
+      // Create the time slot
+      const timeSlot = await TimeSlot.create({
+        venueId,
+        spaceId,
+        date,
+        startTime,
+        endTime,
+        price: price || 150,
+        isCustom: true,
+        isActive: true,
+        createdBy: user.id,
+      });
+
+      res.status(201).json({
+        message: "Time slot created successfully",
+        slot: {
+          id: timeSlot._id.toString(),
+          date: timeSlot.date,
+          startTime: timeSlot.startTime,
+          endTime: timeSlot.endTime,
+          price: timeSlot.price,
+          isCustom: true,
+          available: true,
+        },
+      });
+    } catch (error: any) {
+      console.error("Error creating time slot:", error);
+      if (error.code === 11000) {
+        return res.status(409).json({
+          message: "A slot with this time already exists",
+        });
+      }
+      res.status(500).json({ message: "Failed to create time slot" });
+    }
+  }
+);
+
+// Update a custom time slot (Admin only)
+app.put(
+  "/api/venues/:venueId/spaces/:spaceId/slots/:slotId",
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const { venueId, spaceId, slotId } = req.params;
+      const { date, startTime, endTime, price } = req.body;
+
+      // Find the existing slot
+      const existingSlot = await TimeSlot.findOne({
+        _id: slotId,
+        venueId,
+        spaceId,
+      });
+
+      if (!existingSlot) {
+        return res.status(404).json({ message: "Time slot not found" });
+      }
+
+      // Validate time format if provided
+      const timeRegex = /^([01]?[0-9]|2[0-3]):[0-5][0-9]$/;
+      if (startTime && !timeRegex.test(startTime)) {
+        return res.status(400).json({
+          message: "Invalid start time format. Use HH:MM (24-hour format)",
+        });
+      }
+      if (endTime && !timeRegex.test(endTime)) {
+        return res.status(400).json({
+          message: "Invalid end time format. Use HH:MM (24-hour format)",
+        });
+      }
+
+      // Use existing values if not provided
+      const newStartTime = startTime || existingSlot.startTime;
+      const newEndTime = endTime || existingSlot.endTime;
+      const newDate = date || existingSlot.date;
+
+      // Validate end time is after start time
+      const startMinutes =
+        parseInt(newStartTime.split(":")[0]) * 60 +
+        parseInt(newStartTime.split(":")[1]);
+      const endMinutes =
+        parseInt(newEndTime.split(":")[0]) * 60 +
+        parseInt(newEndTime.split(":")[1]);
+      if (endMinutes <= startMinutes) {
+        return res.status(400).json({
+          message: "End time must be after start time",
+        });
+      }
+
+      // Check for overlapping slots (excluding current slot)
+      const hasOverlap = await checkSlotOverlap(
+        venueId,
+        spaceId,
+        newDate,
+        newStartTime,
+        newEndTime,
+        slotId
+      );
+      if (hasOverlap) {
+        return res.status(409).json({
+          message: "This time slot overlaps with an existing slot",
+        });
+      }
+
+      // Check if slot has an active booking
+      const booking = await Booking.findOne({
+        venueId,
+        spaceId,
+        date: existingSlot.date,
+        startTime: existingSlot.startTime,
+        status: { $ne: "cancelled" },
+      });
+
+      if (
+        booking &&
+        (newStartTime !== existingSlot.startTime ||
+          newEndTime !== existingSlot.endTime ||
+          newDate !== existingSlot.date)
+      ) {
+        return res.status(409).json({
+          message: "Cannot modify time for a slot that has an active booking",
+        });
+      }
+
+      // Update the slot
+      existingSlot.date = newDate;
+      existingSlot.startTime = newStartTime;
+      existingSlot.endTime = newEndTime;
+      if (price !== undefined) {
+        existingSlot.price = price;
+      }
+      await existingSlot.save();
+
+      res.status(200).json({
+        message: "Time slot updated successfully",
+        slot: {
+          id: existingSlot._id.toString(),
+          date: existingSlot.date,
+          startTime: existingSlot.startTime,
+          endTime: existingSlot.endTime,
+          price: existingSlot.price,
+          isCustom: true,
+        },
+      });
+    } catch (error) {
+      console.error("Error updating time slot:", error);
+      res.status(500).json({ message: "Failed to update time slot" });
+    }
+  }
+);
+
+// Delete a custom time slot (Admin only)
+app.delete(
+  "/api/venues/:venueId/spaces/:spaceId/slots/:slotId",
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const { venueId, spaceId, slotId } = req.params;
+
+      // Find the existing slot
+      const existingSlot = await TimeSlot.findOne({
+        _id: slotId,
+        venueId,
+        spaceId,
+      });
+
+      if (!existingSlot) {
+        return res.status(404).json({ message: "Time slot not found" });
+      }
+
+      // Check if slot has an active booking
+      const booking = await Booking.findOne({
+        venueId,
+        spaceId,
+        date: existingSlot.date,
+        startTime: existingSlot.startTime,
+        status: { $ne: "cancelled" },
+      });
+
+      if (booking) {
+        return res.status(409).json({
+          message:
+            "Cannot delete a slot that has an active booking. Cancel the booking first.",
+        });
+      }
+
+      // Delete the slot
+      await TimeSlot.deleteOne({ _id: slotId });
+
+      res.status(200).json({
+        message: "Time slot deleted successfully",
+      });
+    } catch (error) {
+      console.error("Error deleting time slot:", error);
+      res.status(500).json({ message: "Failed to delete time slot" });
+    }
+  }
+);
+
+// Generate time slots for a space based on venue operating hours (Admin only)
+// This creates TimeSlot records in the database for a specified date range
+app.post(
+  "/api/venues/:venueId/spaces/:spaceId/generate-slots",
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const { venueId, spaceId } = req.params;
+      const { startDate, endDate, price } = req.body;
+      const user = (req as any).user;
+
+      // Verify venue and space exist
+      const venue = await Venue.findById(venueId);
+      if (!venue) {
+        return res.status(404).json({ message: "Venue not found" });
+      }
+
+      const space = venue.subVenues.find((s) => s.id === spaceId);
+      if (!space) {
+        return res.status(404).json({ message: "Space not found" });
+      }
+
+      if (!venue.operatingHours) {
+        return res.status(400).json({
+          message: "Venue does not have operating hours configured",
+        });
+      }
+
+      // Default to next 14 days if no dates provided
+      const start = startDate ? new Date(startDate) : new Date();
+      const end = endDate
+        ? new Date(endDate)
+        : new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
+
+      const dayNames = [
+        "sunday",
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+      ] as const;
+
+      const createdSlots: any[] = [];
+      const skippedSlots: any[] = [];
+
+      // Iterate through each day in the range
+      for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+        const dateStr = d.toISOString().split("T")[0];
+        const dayOfWeek = d.getDay();
+        const dayName = dayNames[dayOfWeek];
+        const hours = venue.operatingHours[dayName];
+
+        if (!hours) {
+          continue; // Venue closed on this day
+        }
+
+        // Parse operating hours with rounding (supports AM/PM format)
+        const openTime = parseTimeString(hours.open);
+        const effectiveOpenHour =
+          openTime.minute > 0 ? openTime.hour + 1 : openTime.hour;
+        const closeTime = parseTimeString(hours.close);
+        const closeHour = closeTime.hour;
+
+        // Generate hourly slots for this day
+        for (let hour = effectiveOpenHour; hour < closeHour; hour++) {
+          const startTime = `${hour.toString().padStart(2, "0")}:00`;
+          const endTime = `${(hour + 1).toString().padStart(2, "0")}:00`;
+
+          try {
+            const timeSlot = await TimeSlot.create({
+              venueId,
+              spaceId,
+              date: dateStr,
+              startTime,
+              endTime,
+              price: price || 150,
+              isCustom: false, // Auto-generated
+              isActive: true,
+              createdBy: user.id,
+            });
+
+            createdSlots.push({
+              id: timeSlot._id.toString(),
+              date: dateStr,
+              startTime,
+              endTime,
+              price: timeSlot.price,
+            });
+          } catch (error: any) {
+            // Slot already exists, skip it
+            if (error.code === 11000) {
+              skippedSlots.push({ date: dateStr, startTime, endTime });
+            }
+          }
+        }
+      }
+
+      res.status(201).json({
+        message: `Generated ${createdSlots.length} time slots`,
+        created: createdSlots.length,
+        skipped: skippedSlots.length,
+        slots: createdSlots,
+      });
+    } catch (error) {
+      console.error("Error generating time slots:", error);
+      res.status(500).json({ message: "Failed to generate time slots" });
     }
   }
 );
@@ -779,7 +1301,7 @@ app.get("/api/bookings/my", async (req: Request, res: Response) => {
   }
 });
 
-// Cancel a booking
+// Cancel a booking (deletes from database)
 app.patch("/api/bookings/:id/cancel", async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
@@ -802,10 +1324,10 @@ app.patch("/api/bookings/:id/cancel", async (req: Request, res: Response) => {
       }
     }
 
-    booking.status = "cancelled";
-    await booking.save();
+    // Delete the booking from the database instead of soft-delete
+    await Booking.findByIdAndDelete(req.params.id);
 
-    res.status(200).json({ message: "Booking cancelled", booking });
+    res.status(200).json({ message: "Booking cancelled and removed" });
   } catch (error) {
     console.error("Error cancelling booking:", error);
     res.status(500).json({ message: "Failed to cancel booking" });
