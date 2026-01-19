@@ -14,7 +14,7 @@ const PlayerSchema: Schema = new Schema(
     jerseyColor: { type: String, required: true },
     position: { type: String, required: true },
   },
-  { _id: false }
+  { _id: false },
 );
 
 export interface IEvent extends Document {
@@ -30,6 +30,7 @@ export interface IEvent extends Document {
   roster: IPlayer[];
   latitude?: number;
   longitude?: number;
+  jerseyColors?: string[]; // Team colors for the event
 }
 
 const EventSchema: Schema = new Schema(
@@ -46,8 +47,9 @@ const EventSchema: Schema = new Schema(
     roster: { type: [PlayerSchema], default: [] },
     latitude: { type: Number, required: false },
     longitude: { type: Number, required: false },
+    jerseyColors: { type: [String], default: [] }, // Team colors for the event
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 const Event = mongoose.model<IEvent>("Event", EventSchema);

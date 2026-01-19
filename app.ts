@@ -43,7 +43,7 @@ app.use(express.json());
 app.use(
   express.urlencoded({
     extended: true,
-  })
+  }),
 );
 
 // JWT middleware
@@ -133,6 +133,7 @@ app.post("/events", async (req: Request, res: Response) => {
       createdByUsername,
       latitude,
       longitude,
+      jerseyColors,
     } = req.body;
 
     if (
@@ -166,6 +167,7 @@ app.post("/events", async (req: Request, res: Response) => {
       roster: [],
       latitude,
       longitude,
+      jerseyColors: jerseyColors || [],
     });
 
     res.status(201).json(newEvent);
@@ -188,6 +190,7 @@ app.put("/events/:id", async (req: Request, res: Response) => {
       createdByUsername,
       latitude,
       longitude,
+      jerseyColors,
     } = req.body;
 
     const event = await Event.findById(eventId);
@@ -205,6 +208,7 @@ app.put("/events/:id", async (req: Request, res: Response) => {
 
     if (latitude !== undefined) event.latitude = latitude;
     if (longitude !== undefined) event.longitude = longitude;
+    if (jerseyColors !== undefined) event.jerseyColors = jerseyColors;
 
     await event.save();
     res.status(200).json(event);
@@ -264,7 +268,7 @@ app.delete(
         .status(500)
         .json({ message: "Error removing player from roster" });
     }
-  }
+  },
 );
 
 // Update rosterSpotsFilled (join/leave event, legacy)
@@ -472,7 +476,7 @@ app.put(
       console.error("Error updating venue:", error);
       res.status(500).json({ message: "Failed to update venue" });
     }
-  }
+  },
 );
 
 // Delete a venue (admin only)
@@ -494,7 +498,7 @@ app.delete(
       console.error("Error deleting venue:", error);
       res.status(500).json({ message: "Failed to delete venue" });
     }
-  }
+  },
 );
 
 // ==================== END VENUE ENDPOINTS ====================
@@ -528,7 +532,7 @@ const generateTimeSlots = (
   date: string,
   operatingHours: { open: string; close: string } | null,
   existingBookings: any[],
-  customSlots: any[] // Custom slots that override auto-generation
+  customSlots: any[], // Custom slots that override auto-generation
 ) => {
   if (!operatingHours) {
     return []; // Venue closed on this day
@@ -570,7 +574,9 @@ const generateTimeSlots = (
     // Find if this slot is booked
     const booking = existingBookings.find(
       (b) =>
-        b.date === date && b.startTime === startTime && b.status !== "cancelled"
+        b.date === date &&
+        b.startTime === startTime &&
+        b.status !== "cancelled",
     );
 
     slots.push({
@@ -667,7 +673,7 @@ app.get(
 
         // Get custom slots for this date
         const customSlotsForDate = customSlots.filter(
-          (cs) => cs.date === dateStr
+          (cs) => cs.date === dateStr,
         );
 
         // Generate auto slots (excluding times covered by custom slots)
@@ -675,7 +681,7 @@ app.get(
           dateStr,
           hours,
           existingBookings,
-          customSlotsForDate
+          customSlotsForDate,
         );
         allSlots.push(...autoSlots);
 
@@ -685,7 +691,7 @@ app.get(
             (b) =>
               b.date === dateStr &&
               b.startTime === customSlot.startTime &&
-              b.status !== "cancelled"
+              b.status !== "cancelled",
           );
 
           allSlots.push({
@@ -720,7 +726,7 @@ app.get(
       console.error("Error fetching time slots:", error);
       res.status(500).json({ message: "Failed to fetch time slots" });
     }
-  }
+  },
 );
 
 // ==================== ADMIN SLOT MANAGEMENT ====================
@@ -732,7 +738,7 @@ const checkSlotOverlap = async (
   date: string,
   startTime: string,
   endTime: string,
-  excludeSlotId?: string
+  excludeSlotId?: string,
 ): Promise<boolean> => {
   const startMinutes =
     parseInt(startTime.split(":")[0]) * 60 + parseInt(startTime.split(":")[1]);
@@ -818,7 +824,7 @@ app.post(
         spaceId,
         date,
         startTime,
-        endTime
+        endTime,
       );
       if (hasOverlap) {
         return res.status(409).json({
@@ -860,7 +866,7 @@ app.post(
       }
       res.status(500).json({ message: "Failed to create time slot" });
     }
-  }
+  },
 );
 
 // Update a custom time slot (Admin only)
@@ -921,7 +927,7 @@ app.put(
         newDate,
         newStartTime,
         newEndTime,
-        slotId
+        slotId,
       );
       if (hasOverlap) {
         return res.status(409).json({
@@ -973,7 +979,7 @@ app.put(
       console.error("Error updating time slot:", error);
       res.status(500).json({ message: "Failed to update time slot" });
     }
-  }
+  },
 );
 
 // Delete a custom time slot (Admin only)
@@ -1021,7 +1027,7 @@ app.delete(
       console.error("Error deleting time slot:", error);
       res.status(500).json({ message: "Failed to delete time slot" });
     }
-  }
+  },
 );
 
 // Generate time slots for a space based on venue operating hours (Admin only)
@@ -1133,7 +1139,7 @@ app.post(
       console.error("Error generating time slots:", error);
       res.status(500).json({ message: "Failed to generate time slots" });
     }
-  }
+  },
 );
 
 // Book a time slot
@@ -1217,7 +1223,7 @@ app.post(
       }
       res.status(500).json({ message: "Failed to create booking" });
     }
-  }
+  },
 );
 
 // Send an inquiry about a space
@@ -1279,7 +1285,7 @@ app.post(
       console.error("Error creating inquiry:", error);
       res.status(500).json({ message: "Failed to send inquiry" });
     }
-  }
+  },
 );
 
 // Get user's bookings
@@ -1357,7 +1363,7 @@ app.get(
       console.error("Error fetching venue bookings:", error);
       res.status(500).json({ message: "Failed to fetch bookings" });
     }
-  }
+  },
 );
 
 // Admin: Update booking status
@@ -1374,7 +1380,7 @@ app.patch(
       const booking = await Booking.findByIdAndUpdate(
         req.params.id,
         { status },
-        { new: true }
+        { new: true },
       );
 
       if (!booking) {
@@ -1386,7 +1392,7 @@ app.patch(
       console.error("Error updating booking status:", error);
       res.status(500).json({ message: "Failed to update booking" });
     }
-  }
+  },
 );
 
 // ==================== END BOOKING ENDPOINTS ====================
@@ -1436,7 +1442,7 @@ app.post(
 
       const token = jwt.sign(
         { id: newUser._id, tokenVersion: newUser.tokenVersion },
-        JWT_SECRET
+        JWT_SECRET,
       );
       return res.status(201).json({ success: true, user: newUser, token });
     } catch (error) {
@@ -1445,7 +1451,7 @@ app.post(
         .status(500)
         .json({ message: "Failed to create a new user. Please try again" });
     }
-  }
+  },
 );
 
 // User API to login
@@ -1465,7 +1471,7 @@ app.post("/auth/login", async (req: Request, res: Response) => {
 
     const token = jwt.sign(
       { id: user._id, tokenVersion: user.tokenVersion },
-      JWT_SECRET
+      JWT_SECRET,
     );
     return res.status(200).json({ success: true, user, token });
   } catch (error) {
@@ -1570,7 +1576,7 @@ app.put("/auth/change-password", async (req: Request, res: Response) => {
     // Issue a new token with updated tokenVersion
     const newToken = jwt.sign(
       { id: user._id, tokenVersion: user.tokenVersion },
-      JWT_SECRET
+      JWT_SECRET,
     );
 
     return res.status(200).json({
@@ -1611,7 +1617,7 @@ app.post("/auth/forgot-password", async (req: Request, res: Response) => {
     const resetToken = jwt.sign(
       { id: user._id, purpose: "password-reset" },
       JWT_SECRET,
-      { expiresIn: "1h" }
+      { expiresIn: "1h" },
     );
 
     // Configure nodemailer transporter
@@ -1872,11 +1878,11 @@ app.get("/auth/user-data", async (req: Request, res: Response) => {
       statistics: {
         totalEventsCreated: eventsCreated.length,
         totalEventsJoined: eventsJoined.filter(
-          (e: any) => e.createdBy !== userId
+          (e: any) => e.createdBy !== userId,
         ).length,
         totalCommunityPosts: communityNotes.length,
         totalComments: userCommentsAndReplies.filter(
-          (c) => c.type === "comment"
+          (c) => c.type === "comment",
         ).length,
         totalReplies: userCommentsAndReplies.filter((c) => c.type === "reply")
           .length,
@@ -1922,7 +1928,7 @@ app.delete("/auth/delete-account", async (req: Request, res: Response) => {
 
     console.log(
       "Delete account - Extracted token (first 20 chars):",
-      token.substring(0, 20)
+      token.substring(0, 20),
     );
 
     // Check for null/undefined token (frontend bug)
@@ -1986,7 +1992,7 @@ app.delete("/auth/delete-account", async (req: Request, res: Response) => {
       {
         $pull: { roster: { username: username } },
         $inc: { rosterSpotsFilled: -1 },
-      }
+      },
     );
 
     // 4. Delete all community notes created by the user
@@ -1995,27 +2001,27 @@ app.delete("/auth/delete-account", async (req: Request, res: Response) => {
     // 5. Remove user's comments from community notes
     await communityNote.updateMany(
       { "comments.userId": userId },
-      { $pull: { comments: { userId: userId } } }
+      { $pull: { comments: { userId: userId } } },
     );
 
     // 6. Remove user's replies from comments in community notes
     await communityNote.updateMany(
       { "comments.replies.userId": userId },
-      { $pull: { "comments.$[].replies": { userId: userId } } }
+      { $pull: { "comments.$[].replies": { userId: userId } } },
     );
 
     // 7. Remove user's likes from community notes, comments, and replies
     await communityNote.updateMany(
       { likes: userId },
-      { $pull: { likes: userId } }
+      { $pull: { likes: userId } },
     );
     await communityNote.updateMany(
       { "comments.likes": userId },
-      { $pull: { "comments.$[].likes": userId } }
+      { $pull: { "comments.$[].likes": userId } },
     );
     await communityNote.updateMany(
       { "comments.replies.likes": userId },
-      { $pull: { "comments.$[].replies.$[].likes": userId } }
+      { $pull: { "comments.$[].replies.$[].likes": userId } },
     );
 
     // 8. Delete the user account
@@ -2150,7 +2156,7 @@ app.get("/community-notes", async (req: Request, res: Response) => {
         id: u._id.toString(),
         username: u.username,
         profilePicUrl: u.profilePicUrl || "NO_PIC",
-      }))
+      })),
     );
 
     // Map for profile pictures
@@ -2179,7 +2185,7 @@ app.get("/community-notes", async (req: Request, res: Response) => {
       console.log(
         `📸 Post by ${post.username} (${postUserId}): pic = ${
           postPic ? "YES" : "NO"
-        }`
+        }`,
       );
 
       return {
@@ -2209,7 +2215,7 @@ app.get("/community-notes", async (req: Request, res: Response) => {
 
     console.log(
       "✅ Sending postsWithPhotos, first post profilePicUrl:",
-      postsWithPhotos[0]?.profilePicUrl
+      postsWithPhotos[0]?.profilePicUrl,
     );
 
     res.status(200).json(postsWithPhotos);
@@ -2298,7 +2304,7 @@ app.post(
     } catch (error) {
       res.status(500).json({ message: "Failed to add comment." });
     }
-  }
+  },
 );
 
 // Edit a comment
@@ -2318,7 +2324,7 @@ app.put(
     } catch (error) {
       res.status(500).json({ message: "Failed to edit comment." });
     }
-  }
+  },
 );
 
 // Delete a comment
@@ -2337,7 +2343,7 @@ app.delete(
     } catch (error) {
       res.status(500).json({ message: "Failed to delete comment." });
     }
-  }
+  },
 );
 
 // Add a reply to a comment
@@ -2370,7 +2376,7 @@ app.post(
     } catch (error) {
       res.status(500).json({ message: "Failed to add reply." });
     }
-  }
+  },
 );
 
 // Edit a reply
@@ -2392,7 +2398,7 @@ app.put(
     } catch (error) {
       res.status(500).json({ message: "Failed to edit reply." });
     }
-  }
+  },
 );
 
 // Delete a reply
@@ -2413,7 +2419,7 @@ app.delete(
     } catch (error) {
       res.status(500).json({ message: "Failed to delete reply." });
     }
-  }
+  },
 );
 
 // Toggle like on a post
@@ -2458,7 +2464,7 @@ app.post(
     } catch (error) {
       res.status(500).json({ message: "Failed to toggle like on post." });
     }
-  }
+  },
 );
 
 // Toggle like on a comment
@@ -2506,7 +2512,7 @@ app.post(
     } catch (error) {
       res.status(500).json({ message: "Failed to toggle like on comment." });
     }
-  }
+  },
 );
 
 // Toggle like on a reply
@@ -2556,7 +2562,7 @@ app.post(
     } catch (error) {
       res.status(500).json({ message: "Failed to toggle like on reply." });
     }
-  }
+  },
 );
 
 // ==================== END COMMUNITY NOTES ENDPOINTS ====================
