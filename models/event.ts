@@ -5,6 +5,8 @@ export interface IPlayer {
   paidStatus: string;
   jerseyColor: string;
   position: string;
+  profilePicUrl?: string; // Player's profile picture URL
+  userId?: string; // Player's user ID for profile navigation
 }
 
 const PlayerSchema: Schema = new Schema(
@@ -13,6 +15,8 @@ const PlayerSchema: Schema = new Schema(
     paidStatus: { type: String, required: true },
     jerseyColor: { type: String, required: true },
     position: { type: String, required: true },
+    profilePicUrl: { type: String, required: false },
+    userId: { type: String, required: false },
   },
   { _id: false },
 );
