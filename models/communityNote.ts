@@ -10,7 +10,7 @@ const ReplySchema = new Schema(
     profilePicUrl: String,
     likes: [{ type: String }], // Array of userIds who liked
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 const CommentSchema = new Schema(
@@ -22,7 +22,7 @@ const CommentSchema = new Schema(
     replies: [ReplySchema],
     likes: [{ type: String }], // Array of userIds who liked
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 const CommunityNoteSchema = new Schema(
@@ -33,8 +33,12 @@ const CommunityNoteSchema = new Schema(
     profilePicUrl: String,
     comments: [CommentSchema],
     likes: [{ type: String }], // Array of userIds who liked
+    // Event link fields (optional - for posts linked to events)
+    eventId: { type: String, default: null },
+    eventName: { type: String, default: null },
+    eventType: { type: String, default: null },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 export default mongoose.model("CommunityNote", CommunityNoteSchema);

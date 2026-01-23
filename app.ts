@@ -2225,10 +2225,32 @@ app.get("/community-notes", async (req: Request, res: Response) => {
   }
 });
 
+// Get community note by linked event ID
+app.get(
+  "/community-notes/event/:eventId",
+  async (req: Request, res: Response) => {
+    try {
+      const { eventId } = req.params;
+      const post = await communityNote.findOne({ eventId });
+
+      if (!post) {
+        return res
+          .status(404)
+          .json({ message: "No post found for this event." });
+      }
+
+      res.status(200).json(post);
+    } catch (error) {
+      console.error("❌ Error fetching community note by event:", error);
+      res.status(500).json({ message: "Failed to fetch post." });
+    }
+  },
+);
+
 // Create a new post
 app.post("/community-notes", async (req: Request, res: Response) => {
   try {
-    const { text, userId, username } = req.body;
+    const { text, userId, username, eventId, eventName, eventType } = req.body;
     if (!text || !userId || !username) {
       return res.status(400).json({ message: "Missing required fields." });
     }
@@ -2243,6 +2265,10 @@ app.post("/community-notes", async (req: Request, res: Response) => {
       username,
       profilePicUrl,
       comments: [],
+      // Event link fields (optional)
+      eventId: eventId || null,
+      eventName: eventName || null,
+      eventType: eventType || null,
     });
     res.status(201).json(newPost);
   } catch (error) {
