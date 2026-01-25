@@ -2092,6 +2092,138 @@ app.put("/user/profile-pic", async (req: Request, res: Response) => {
   }
 });
 
+// ==================== FAVORITE SPORTS ENDPOINTS ====================
+
+// Get user's favorite sports
+app.get("/user/:id/favorite-sports", async (req: Request, res: Response) => {
+  try {
+    const user = await User.findById(req.params.id).select("favoriteSports");
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    return res.status(200).json({
+      success: true,
+      favoriteSports: user.favoriteSports || [],
+    });
+  } catch (error) {
+    console.error("Error fetching favorite sports:", error);
+    return res.status(500).json({ message: "Failed to fetch favorite sports" });
+  }
+});
+
+// Update user's favorite sports
+app.put("/user/:id/favorite-sports", async (req: Request, res: Response) => {
+  try {
+    const { favoriteSports } = req.body;
+
+    if (!Array.isArray(favoriteSports)) {
+      return res
+        .status(400)
+        .json({ message: "favoriteSports must be an array" });
+    }
+
+    const user = await User.findById(req.params.id);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    user.favoriteSports = favoriteSports;
+    await user.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Favorite sports updated successfully",
+      favoriteSports: user.favoriteSports,
+    });
+  } catch (error) {
+    console.error("Error updating favorite sports:", error);
+    return res
+      .status(500)
+      .json({ message: "Failed to update favorite sports" });
+  }
+});
+
+// ==================== END FAVORITE SPORTS ENDPOINTS ====================
+
+// ==================== USER EVENTS ENDPOINTS ====================
+
+// Get events created by a specific user
+app.get("/user/:id/events/created", async (req: Request, res: Response) => {
+  try {
+    const userId = req.params.id;
+    const events = await Event.find({ createdBy: userId }).sort({ date: -1 });
+    return res.status(200).json({
+      success: true,
+      events,
+      count: events.length,
+    });
+  } catch (error) {
+    console.error("Error fetching created events:", error);
+    return res.status(500).json({ message: "Failed to fetch created events" });
+  }
+});
+
+// Get events joined by a specific user (where user is in the roster)
+app.get("/user/:id/events/joined", async (req: Request, res: Response) => {
+  try {
+    const userId = req.params.id;
+
+    // First get the user to get their username
+    const user = await User.findById(userId).select("username");
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Find events where user is in roster but NOT the creator
+    const events = await Event.find({
+      "roster.username": user.username,
+      createdBy: { $ne: userId }, // Exclude events they created
+    }).sort({ date: -1 });
+
+    return res.status(200).json({
+      success: true,
+      events,
+      count: events.length,
+    });
+  } catch (error) {
+    console.error("Error fetching joined events:", error);
+    return res.status(500).json({ message: "Failed to fetch joined events" });
+  }
+});
+
+// Get count of events created and joined by user (for profile stats)
+app.get("/user/:id/events/stats", async (req: Request, res: Response) => {
+  try {
+    const userId = req.params.id;
+
+    // Get the user to get their username
+    const user = await User.findById(userId).select("username");
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Count events created
+    const createdCount = await Event.countDocuments({ createdBy: userId });
+
+    // Count events joined (in roster but not creator)
+    const joinedCount = await Event.countDocuments({
+      "roster.username": user.username,
+      createdBy: { $ne: userId },
+    });
+
+    return res.status(200).json({
+      success: true,
+      created: createdCount,
+      joined: joinedCount,
+    });
+  } catch (error) {
+    console.error("Error fetching event stats:", error);
+    return res.status(500).json({ message: "Failed to fetch event stats" });
+  }
+});
+
+// ==================== END USER EVENTS ENDPOINTS ====================
+
 // Legacy: bulk update roster (not recommended for add/remove single player)
 app.put("/events/:id/roster", async (req: Request, res: Response) => {
   const eventId = req.params.id;
