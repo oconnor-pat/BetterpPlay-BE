@@ -9,6 +9,9 @@ export interface IUser extends Document {
   tokenVersion: number;
   isAdmin: boolean;
   favoriteSports: string[];
+  friends: mongoose.Types.ObjectId[];
+  friendRequestsSent: mongoose.Types.ObjectId[];
+  friendRequestsReceived: mongoose.Types.ObjectId[];
 }
 
 const UserSchema: Schema = new Schema(
@@ -21,6 +24,13 @@ const UserSchema: Schema = new Schema(
     tokenVersion: { type: Number, default: 0 }, // Increment to invalidate all tokens
     isAdmin: { type: Boolean, default: false }, // Admin flag for venue management
     favoriteSports: { type: [String], default: [] }, // User's favorite sports
+    friends: [{ type: Schema.Types.ObjectId, ref: "Users", default: [] }],
+    friendRequestsSent: [
+      { type: Schema.Types.ObjectId, ref: "Users", default: [] },
+    ],
+    friendRequestsReceived: [
+      { type: Schema.Types.ObjectId, ref: "Users", default: [] },
+    ],
   },
   { timestamps: true },
 );
