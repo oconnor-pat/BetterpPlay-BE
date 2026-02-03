@@ -9,6 +9,8 @@ export interface INotification extends Document {
     | "friend_accepted"
     | "event_roster"
     | "event_update"
+    | "event_reminder"
+    | "community_note"
     | "general";
   data?: Record<string, any>;
   read: boolean;
@@ -39,6 +41,8 @@ const NotificationSchema: Schema = new Schema(
         "friend_accepted",
         "event_roster",
         "event_update",
+        "event_reminder",
+        "community_note",
         "general",
       ],
       required: true,

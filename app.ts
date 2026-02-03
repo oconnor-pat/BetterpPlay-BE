@@ -18,6 +18,7 @@ import AWS from "aws-sdk";
 import { body, validationResult } from "express-validator";
 import nodemailer from "nodemailer";
 import notificationService from "./services/notificationService";
+import eventReminderService from "./services/eventReminderService";
 
 const app: Application = express();
 
@@ -194,6 +195,8 @@ app.get(
             friendRequestAccepted: preferences.friendRequestAccepted,
             eventUpdates: preferences.eventUpdates,
             eventRoster: preferences.eventRoster,
+            eventReminders: preferences.eventReminders,
+            communityNotes: preferences.communityNotes,
             pushEnabled: preferences.pushEnabled,
           },
         });
@@ -226,6 +229,8 @@ app.put(
         friendRequestAccepted,
         eventUpdates,
         eventRoster,
+        eventReminders,
+        communityNotes,
         pushEnabled,
       } = req.body;
 
@@ -237,6 +242,10 @@ app.put(
       if (typeof eventUpdates === "boolean")
         updates.eventUpdates = eventUpdates;
       if (typeof eventRoster === "boolean") updates.eventRoster = eventRoster;
+      if (typeof eventReminders === "boolean")
+        updates.eventReminders = eventReminders;
+      if (typeof communityNotes === "boolean")
+        updates.communityNotes = communityNotes;
       if (typeof pushEnabled === "boolean") updates.pushEnabled = pushEnabled;
 
       const preferences =
@@ -254,6 +263,8 @@ app.put(
             friendRequestAccepted: preferences.friendRequestAccepted,
             eventUpdates: preferences.eventUpdates,
             eventRoster: preferences.eventRoster,
+            eventReminders: preferences.eventReminders,
+            communityNotes: preferences.communityNotes,
             pushEnabled: preferences.pushEnabled,
           },
         });
@@ -3157,6 +3168,32 @@ app.post("/community-notes", async (req: Request, res: Response) => {
       eventName: eventName || null,
       eventType: eventType || null,
     });
+
+    // If post is linked to an event, notify event attendees
+    if (eventId) {
+      const event = await Event.findById(eventId);
+      if (event && event.roster && event.roster.length > 0) {
+        const attendeeUserIds = event.roster
+          .filter((p: any) => p.userId && p.userId !== userId) // Exclude the poster
+          .map((p: any) => p.userId);
+
+        if (attendeeUserIds.length > 0) {
+          notificationService.sendPushNotificationToMany(
+            attendeeUserIds,
+            "New Community Post 📝",
+            `${username} posted about "${eventName}"`,
+            "community_note",
+            {
+              postId: newPost._id.toString(),
+              eventId: eventId,
+              eventName: eventName || "",
+              posterUsername: username,
+            }
+          );
+        }
+      }
+    }
+
     res.status(201).json(newPost);
   } catch (error) {
     res.status(500).json({ message: "Failed to create post." });
@@ -3213,6 +3250,21 @@ app.post(
       };
       post.comments.push(comment);
       await post.save();
+
+      // Notify the post author about the new comment (if not commenting on own post)
+      if (post.userId && post.userId !== userId) {
+        notificationService.sendPushNotification({
+          userId: post.userId,
+          title: "New Comment 💬",
+          body: `${username} commented on your post`,
+          type: "community_note",
+          data: {
+            postId: post._id.toString(),
+            commenterUsername: username,
+          },
+        });
+      }
+
       res.status(201).json({ comments: post.comments });
     } catch (error) {
       res.status(500).json({ message: "Failed to add comment." });
@@ -3492,6 +3544,9 @@ app.listen(PORT, async () => {
       process.env.MONGODB_URI || "mongodb://localhost:27017/OMHL";
     await mongoose.connect(DATABASE_URL);
     console.log("🛢️ Connected To Database");
+
+    // Start event reminder scheduler
+    eventReminderService.startEventReminderScheduler();
   } catch (error) {
     console.log("⚠️ Error connecting to the database:", error);
     process.exit(1);

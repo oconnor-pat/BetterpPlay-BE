@@ -42,6 +42,8 @@ export type NotificationType =
   | "friend_accepted"
   | "event_roster"
   | "event_update"
+  | "event_reminder"
+  | "community_note"
   | "general";
 
 interface SendNotificationOptions {
@@ -92,6 +94,12 @@ export const sendPushNotification = async (
           break;
         case "event_update":
           if (!preferences.eventUpdates) return false;
+          break;
+        case "event_reminder":
+          if (!preferences.eventReminders) return false;
+          break;
+        case "community_note":
+          if (!preferences.communityNotes) return false;
           break;
       }
     }
@@ -290,6 +298,8 @@ export const updateNotificationPreferences = async (
     friendRequestAccepted: boolean;
     eventUpdates: boolean;
     eventRoster: boolean;
+    eventReminders: boolean;
+    communityNotes: boolean;
     pushEnabled: boolean;
   }>,
 ) => {

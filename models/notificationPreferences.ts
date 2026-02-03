@@ -6,6 +6,8 @@ export interface INotificationPreferences extends Document {
   friendRequestAccepted: boolean;
   eventUpdates: boolean;
   eventRoster: boolean;
+  eventReminders: boolean;
+  communityNotes: boolean;
   pushEnabled: boolean;
   createdAt: Date;
   updatedAt: Date;
@@ -33,6 +35,14 @@ const NotificationPreferencesSchema: Schema = new Schema(
       default: true,
     },
     eventRoster: {
+      type: Boolean,
+      default: true,
+    },
+    eventReminders: {
+      type: Boolean,
+      default: true,
+    },
+    communityNotes: {
       type: Boolean,
       default: true,
     },
