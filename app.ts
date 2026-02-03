@@ -8,12 +8,16 @@ import Venue from "./models/venue";
 import Booking from "./models/booking";
 import Inquiry from "./models/inquiry";
 import TimeSlot from "./models/timeSlot";
+import DeviceToken from "./models/deviceToken";
+import NotificationPreferences from "./models/notificationPreferences";
+import Notification from "./models/notification";
 import dotenv from "dotenv";
 import jwt from "jsonwebtoken";
 import cors from "cors";
 import AWS from "aws-sdk";
 import { body, validationResult } from "express-validator";
 import nodemailer from "nodemailer";
+import notificationService from "./services/notificationService";
 
 const app: Application = express();
 
@@ -93,6 +97,243 @@ app.get("/check", (req: Request, res: Response) => {
 app.get("/", (req: Request, res: Response) => {
   res.send("Welcome to a better way to play!");
 });
+
+// ==================== NOTIFICATION ENDPOINTS ====================
+
+// Register a device token for push notifications
+app.post(
+  "/api/notifications/register-device",
+  async (req: Request, res: Response) => {
+    try {
+      const user = (req as any).user;
+      if (!user || !user.id) {
+        return res.status(401).json({ message: "Authentication required" });
+      }
+
+      const { deviceToken, platform } = req.body;
+
+      if (!deviceToken || !platform) {
+        return res
+          .status(400)
+          .json({ message: "Device token and platform are required" });
+      }
+
+      if (!["ios", "android", "web"].includes(platform)) {
+        return res
+          .status(400)
+          .json({ message: "Platform must be ios, android, or web" });
+      }
+
+      const success = await notificationService.registerDeviceToken(
+        user.id,
+        deviceToken,
+        platform,
+      );
+
+      if (success) {
+        return res
+          .status(200)
+          .json({ success: true, message: "Device registered successfully" });
+      } else {
+        return res.status(500).json({ message: "Failed to register device" });
+      }
+    } catch (error) {
+      console.error("Error registering device:", error);
+      return res.status(500).json({ message: "Failed to register device" });
+    }
+  },
+);
+
+// Unregister a device token (on logout)
+app.post(
+  "/api/notifications/unregister-device",
+  async (req: Request, res: Response) => {
+    try {
+      const { deviceToken } = req.body;
+
+      if (!deviceToken) {
+        return res.status(400).json({ message: "Device token is required" });
+      }
+
+      const success =
+        await notificationService.unregisterDeviceToken(deviceToken);
+
+      if (success) {
+        return res
+          .status(200)
+          .json({ success: true, message: "Device unregistered successfully" });
+      } else {
+        return res.status(500).json({ message: "Failed to unregister device" });
+      }
+    } catch (error) {
+      console.error("Error unregistering device:", error);
+      return res.status(500).json({ message: "Failed to unregister device" });
+    }
+  },
+);
+
+// Get notification preferences
+app.get(
+  "/api/notifications/preferences",
+  async (req: Request, res: Response) => {
+    try {
+      const user = (req as any).user;
+      if (!user || !user.id) {
+        return res.status(401).json({ message: "Authentication required" });
+      }
+
+      const preferences = await notificationService.getNotificationPreferences(
+        user.id,
+      );
+
+      if (preferences) {
+        return res.status(200).json({
+          success: true,
+          preferences: {
+            friendRequests: preferences.friendRequests,
+            friendRequestAccepted: preferences.friendRequestAccepted,
+            eventUpdates: preferences.eventUpdates,
+            eventRoster: preferences.eventRoster,
+            pushEnabled: preferences.pushEnabled,
+          },
+        });
+      } else {
+        return res
+          .status(500)
+          .json({ message: "Failed to get notification preferences" });
+      }
+    } catch (error) {
+      console.error("Error getting notification preferences:", error);
+      return res
+        .status(500)
+        .json({ message: "Failed to get notification preferences" });
+    }
+  },
+);
+
+// Update notification preferences
+app.put(
+  "/api/notifications/preferences",
+  async (req: Request, res: Response) => {
+    try {
+      const user = (req as any).user;
+      if (!user || !user.id) {
+        return res.status(401).json({ message: "Authentication required" });
+      }
+
+      const {
+        friendRequests,
+        friendRequestAccepted,
+        eventUpdates,
+        eventRoster,
+        pushEnabled,
+      } = req.body;
+
+      const updates: any = {};
+      if (typeof friendRequests === "boolean")
+        updates.friendRequests = friendRequests;
+      if (typeof friendRequestAccepted === "boolean")
+        updates.friendRequestAccepted = friendRequestAccepted;
+      if (typeof eventUpdates === "boolean")
+        updates.eventUpdates = eventUpdates;
+      if (typeof eventRoster === "boolean") updates.eventRoster = eventRoster;
+      if (typeof pushEnabled === "boolean") updates.pushEnabled = pushEnabled;
+
+      const preferences =
+        await notificationService.updateNotificationPreferences(
+          user.id,
+          updates,
+        );
+
+      if (preferences) {
+        return res.status(200).json({
+          success: true,
+          message: "Preferences updated successfully",
+          preferences: {
+            friendRequests: preferences.friendRequests,
+            friendRequestAccepted: preferences.friendRequestAccepted,
+            eventUpdates: preferences.eventUpdates,
+            eventRoster: preferences.eventRoster,
+            pushEnabled: preferences.pushEnabled,
+          },
+        });
+      } else {
+        return res
+          .status(500)
+          .json({ message: "Failed to update notification preferences" });
+      }
+    } catch (error) {
+      console.error("Error updating notification preferences:", error);
+      return res
+        .status(500)
+        .json({ message: "Failed to update notification preferences" });
+    }
+  },
+);
+
+// Get notification history
+app.get("/api/notifications/history", async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    if (!user || !user.id) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+
+    const limit = parseInt(req.query.limit as string) || 50;
+    const skip = parseInt(req.query.skip as string) || 0;
+
+    const notifications = await notificationService.getNotificationHistory(
+      user.id,
+      limit,
+      skip,
+    );
+
+    return res.status(200).json({
+      success: true,
+      notifications,
+    });
+  } catch (error) {
+    console.error("Error getting notification history:", error);
+    return res
+      .status(500)
+      .json({ message: "Failed to get notification history" });
+  }
+});
+
+// Mark notifications as read
+app.post(
+  "/api/notifications/mark-read",
+  async (req: Request, res: Response) => {
+    try {
+      const user = (req as any).user;
+      if (!user || !user.id) {
+        return res.status(401).json({ message: "Authentication required" });
+      }
+
+      const { notificationIds } = req.body; // Optional: array of specific notification IDs
+
+      const success = await notificationService.markNotificationsAsRead(
+        user.id,
+        notificationIds,
+      );
+
+      if (success) {
+        return res
+          .status(200)
+          .json({ success: true, message: "Notifications marked as read" });
+      } else {
+        return res
+          .status(500)
+          .json({ message: "Failed to mark notifications as read" });
+      }
+    } catch (error) {
+      console.error("Error marking notifications as read:", error);
+      return res
+        .status(500)
+        .json({ message: "Failed to mark notifications as read" });
+    }
+  },
+);
 
 // ==================== EVENT ENDPOINTS ====================
 
@@ -211,6 +452,24 @@ app.put("/events/:id", async (req: Request, res: Response) => {
     if (jerseyColors !== undefined) event.jerseyColors = jerseyColors;
 
     await event.save();
+
+    // Send notifications to all players in the roster about the event update
+    if (event.roster && event.roster.length > 0) {
+      const playerUserIds = event.roster
+        .filter((p: any) => p.userId)
+        .map((p: any) => p.userId);
+
+      if (playerUserIds.length > 0) {
+        notificationService.sendPushNotificationToMany(
+          playerUserIds,
+          "Event Updated",
+          `Event "${event.name}" has been updated`,
+          "event_update",
+          { eventId: event._id.toString(), eventName: event.name },
+        );
+      }
+    }
+
     res.status(200).json(event);
   } catch (error) {
     res.status(500).json({ message: "Failed to update event" });
@@ -236,6 +495,18 @@ app.post("/events/:id/roster", async (req: Request, res: Response) => {
     event.roster.push(player);
     event.rosterSpotsFilled = event.roster.length;
     await event.save();
+
+    // Send notification to the player being added to the roster
+    if (player.userId) {
+      notificationService.sendPushNotification({
+        userId: player.userId,
+        title: "Added to Event",
+        body: `You've been added to "${event.name}"`,
+        type: "event_roster",
+        data: { eventId: event._id.toString(), eventName: event.name },
+      });
+    }
+
     return res.status(200).json({ success: true, roster: event.roster });
   } catch (error) {
     console.error("Error adding player to roster:", error);
@@ -2336,13 +2607,24 @@ app.post(
           $push: { friends: user.id },
           $pull: { friendRequestsSent: user.id },
         });
-        return res
-          .status(200)
-          .json({
-            success: true,
-            message: "Friend request accepted",
-            status: "friends",
-          });
+
+        // Notify both users that they are now friends
+        notificationService.sendPushNotification({
+          userId: userId,
+          title: "Friend Request Accepted",
+          body: `${currentUser.username} accepted your friend request`,
+          type: "friend_accepted",
+          data: {
+            accepterId: user.id,
+            accepterUsername: currentUser.username,
+          },
+        });
+
+        return res.status(200).json({
+          success: true,
+          message: "Friend request accepted",
+          status: "friends",
+        });
       }
 
       // Add to sent requests for current user
@@ -2353,6 +2635,18 @@ app.post(
       // Add to received requests for target user
       await User.findByIdAndUpdate(userId, {
         $addToSet: { friendRequestsReceived: user.id },
+      });
+
+      // Send push notification to the target user
+      notificationService.sendPushNotification({
+        userId: userId,
+        title: "New Friend Request",
+        body: `${currentUser.username} sent you a friend request`,
+        type: "friend_request",
+        data: {
+          senderId: user.id,
+          senderUsername: currentUser.username,
+        },
       });
 
       return res
@@ -2474,6 +2768,18 @@ app.post(
       await User.findByIdAndUpdate(userId, {
         $push: { friends: user.id },
         $pull: { friendRequestsSent: user.id },
+      });
+
+      // Send push notification to the user whose request was accepted
+      notificationService.sendPushNotification({
+        userId: userId,
+        title: "Friend Request Accepted",
+        body: `${currentUser.username} accepted your friend request`,
+        type: "friend_accepted",
+        data: {
+          accepterId: user.id,
+          accepterUsername: currentUser.username,
+        },
       });
 
       return res
