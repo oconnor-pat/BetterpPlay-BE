@@ -3188,7 +3188,7 @@ app.post("/community-notes", async (req: Request, res: Response) => {
               eventId: eventId,
               eventName: eventName || "",
               posterUsername: username,
-            }
+            },
           );
         }
       }

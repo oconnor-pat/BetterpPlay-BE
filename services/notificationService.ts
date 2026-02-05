@@ -8,7 +8,14 @@ import Notification from "../models/notification";
 // FIREBASE_PROJECT_ID, FIREBASE_PRIVATE_KEY, FIREBASE_CLIENT_EMAIL
 const initializeFirebase = () => {
   if (admin.apps.length === 0) {
-    const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n");
+    // Handle both escaped newlines (\\n) and already-parsed newlines
+    let privateKey = process.env.FIREBASE_PRIVATE_KEY;
+    if (privateKey) {
+      // Replace literal \n with actual newlines (handles Heroku env var escaping)
+      privateKey = privateKey.replace(/\\n/g, "\n");
+      // Also handle double-escaped newlines (\\\\n)
+      privateKey = privateKey.replace(/\\\\n/g, "\n");
+    }
 
     if (
       !process.env.FIREBASE_PROJECT_ID ||
@@ -18,18 +25,42 @@ const initializeFirebase = () => {
       console.warn(
         "Firebase credentials not configured. Push notifications will be disabled.",
       );
+      console.warn("Missing:", {
+        hasProjectId: !!process.env.FIREBASE_PROJECT_ID,
+        hasPrivateKey: !!privateKey,
+        hasClientEmail: !!process.env.FIREBASE_CLIENT_EMAIL,
+      });
       return false;
     }
 
-    admin.initializeApp({
-      credential: admin.credential.cert({
-        projectId: process.env.FIREBASE_PROJECT_ID,
-        privateKey: privateKey,
-        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-      }),
-    });
-    console.log("Firebase Admin SDK initialized successfully");
-    return true;
+    // Validate private key format
+    if (
+      !privateKey.includes("-----BEGIN") ||
+      !privateKey.includes("PRIVATE KEY-----")
+    ) {
+      console.error(
+        "FIREBASE_PRIVATE_KEY appears to be malformed. Expected PEM format.",
+      );
+      console.error("Key starts with:", privateKey.substring(0, 50));
+      return false;
+    }
+
+    try {
+      admin.initializeApp({
+        credential: admin.credential.cert({
+          projectId: process.env.FIREBASE_PROJECT_ID,
+          privateKey: privateKey,
+          clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+        }),
+      });
+      console.log("Firebase Admin SDK initialized successfully");
+      console.log("Project ID:", process.env.FIREBASE_PROJECT_ID);
+      console.log("Client Email:", process.env.FIREBASE_CLIENT_EMAIL);
+      return true;
+    } catch (error) {
+      console.error("Failed to initialize Firebase Admin SDK:", error);
+      return false;
+    }
   }
   return true;
 };
