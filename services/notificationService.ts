@@ -173,7 +173,6 @@ export const sendPushNotification = async (
       data: {
         ...data,
         type,
-        click_action: "FLUTTER_NOTIFICATION_CLICK",
       },
       apns: {
         payload: {
