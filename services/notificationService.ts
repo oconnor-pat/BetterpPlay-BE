@@ -125,6 +125,7 @@ export type NotificationType =
   | "event_roster"
   | "event_update"
   | "event_reminder"
+  | "event_invitation"
   | "community_note"
   | "general";
 

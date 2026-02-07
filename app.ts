@@ -346,16 +346,195 @@ app.post(
   },
 );
 
+// Get unread notification count (lightweight endpoint for app startup)
+app.get(
+  "/api/notifications/unread-count",
+  async (req: Request, res: Response) => {
+    try {
+      const user = (req as any).user;
+      if (!user || !user.id) {
+        return res.status(401).json({ message: "Authentication required" });
+      }
+
+      const count = await Notification.countDocuments({
+        userId: user.id,
+        read: false,
+      });
+
+      return res.status(200).json({ count });
+    } catch (error) {
+      console.error("Error getting unread count:", error);
+      return res.status(500).json({ message: "Failed to get unread count" });
+    }
+  },
+);
+
+// Get all notifications for the user (alias for /history)
+app.get("/api/notifications", async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    if (!user || !user.id) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+
+    const limit = parseInt(req.query.limit as string) || 50;
+    const skip = parseInt(req.query.skip as string) || 0;
+
+    const notifications = await notificationService.getNotificationHistory(
+      user.id,
+      limit,
+      skip,
+    );
+
+    // Get unread count
+    const unreadCount = await Notification.countDocuments({
+      userId: user.id,
+      read: false,
+    });
+
+    return res.status(200).json({
+      success: true,
+      notifications,
+      unreadCount,
+    });
+  } catch (error) {
+    console.error("Error getting notifications:", error);
+    return res.status(500).json({ message: "Failed to get notifications" });
+  }
+});
+
+// Mark single notification as read
+app.put("/api/notifications/:id/read", async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    if (!user || !user.id) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+
+    const notification = await Notification.findOneAndUpdate(
+      { _id: req.params.id, userId: user.id },
+      { read: true },
+      { new: true },
+    );
+
+    if (!notification) {
+      return res.status(404).json({ message: "Notification not found" });
+    }
+
+    return res.status(200).json({
+      success: true,
+      notification,
+    });
+  } catch (error) {
+    console.error("Error marking notification as read:", error);
+    return res
+      .status(500)
+      .json({ message: "Failed to mark notification as read" });
+  }
+});
+
+// Mark all notifications as read
+app.put(
+  "/api/notifications/mark-all-read",
+  async (req: Request, res: Response) => {
+    try {
+      const user = (req as any).user;
+      if (!user || !user.id) {
+        return res.status(401).json({ message: "Authentication required" });
+      }
+
+      await Notification.updateMany(
+        { userId: user.id, read: false },
+        { read: true },
+      );
+
+      return res.status(200).json({
+        success: true,
+        message: "All notifications marked as read",
+      });
+    } catch (error) {
+      console.error("Error marking all notifications as read:", error);
+      return res
+        .status(500)
+        .json({ message: "Failed to mark all notifications as read" });
+    }
+  },
+);
+
+// Delete a notification
+app.delete("/api/notifications/:id", async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    if (!user || !user.id) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+
+    const notification = await Notification.findOneAndDelete({
+      _id: req.params.id,
+      userId: user.id,
+    });
+
+    if (!notification) {
+      return res.status(404).json({ message: "Notification not found" });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Notification deleted",
+    });
+  } catch (error) {
+    console.error("Error deleting notification:", error);
+    return res.status(500).json({ message: "Failed to delete notification" });
+  }
+});
+
 // ==================== EVENT ENDPOINTS ====================
 
-// Get all events (include roster)
+// Get all events (include roster) - filtered by privacy
 app.get("/events", async (req: Request, res: Response) => {
   try {
-    const events = await Event.find().lean();
+    // Get current user from JWT if authenticated
+    const currentUser = (req as any).user;
+    const currentUserId = currentUser?.id;
+
+    // Fetch all events first
+    const allEvents = await Event.find().lean();
+
+    // Filter events based on privacy settings
+    const visibleEvents = allEvents.filter((event: any) => {
+      const privacy = event.privacy || "public"; // Default to public for old events
+
+      if (privacy === "public") {
+        return true; // Everyone can see public events
+      }
+
+      if (!currentUserId) {
+        return false; // Non-authenticated users can only see public events
+      }
+
+      // Convert to strings for comparison (handles ObjectId vs string mismatch)
+      const eventCreatorId = String(event.createdBy);
+      const userId = String(currentUserId);
+
+      if (privacy === "private") {
+        // Only the creator can see private events
+        return eventCreatorId === userId;
+      }
+
+      if (privacy === "invite-only") {
+        // Creator and invited users can see invite-only events
+        const invitedUsers = (event.invitedUsers || []).map((id: any) =>
+          String(id),
+        );
+        return eventCreatorId === userId || invitedUsers.includes(userId);
+      }
+
+      return false;
+    });
 
     // Collect all unique userIds from event likes
     const userIds = new Set<string>();
-    events.forEach((event: any) => {
+    visibleEvents.forEach((event: any) => {
       event.likes?.forEach((id: string) => userIds.add(String(id)));
     });
 
@@ -376,7 +555,7 @@ app.get("/events", async (req: Request, res: Response) => {
     });
 
     // Add likedByUsernames to each event
-    const eventsWithLikedBy = events.map((event: any) => ({
+    const eventsWithLikedBy = visibleEvents.map((event: any) => ({
       ...event,
       likedByUsernames: (event.likes || [])
         .map((id: string) => userNameMap.get(String(id)))
@@ -389,12 +568,37 @@ app.get("/events", async (req: Request, res: Response) => {
   }
 });
 
-// Get a single event (include roster)
+// Get a single event (include roster) - with privacy check
 app.get("/events/:id", async (req: Request, res: Response) => {
   try {
     const event = await Event.findById(req.params.id).lean();
     if (!event) {
       return res.status(404).json({ message: "Event not found" });
+    }
+
+    // Check privacy
+    const currentUser = (req as any).user;
+    const currentUserId = currentUser?.id ? String(currentUser.id) : null;
+    const privacy = (event as any).privacy || "public";
+    const invitedUsers = ((event as any).invitedUsers || []).map((id: any) =>
+      String(id),
+    );
+    const eventCreatorId = String((event as any).createdBy);
+
+    if (privacy === "private") {
+      if (!currentUserId || eventCreatorId !== currentUserId) {
+        return res.status(403).json({ message: "This event is private" });
+      }
+    } else if (privacy === "invite-only") {
+      if (
+        !currentUserId ||
+        (eventCreatorId !== currentUserId &&
+          !invitedUsers.includes(currentUserId))
+      ) {
+        return res
+          .status(403)
+          .json({ message: "You are not invited to this event" });
+      }
     }
 
     // Fetch usernames for likers
@@ -436,6 +640,8 @@ app.post("/events", async (req: Request, res: Response) => {
       latitude,
       longitude,
       jerseyColors,
+      privacy,
+      invitedUsers,
     } = req.body;
 
     if (
@@ -456,6 +662,10 @@ app.post("/events", async (req: Request, res: Response) => {
       return res.status(400).json({ message: "Invalid user ID" });
     }
 
+    // Validate privacy value
+    const validPrivacy = ["public", "private", "invite-only"];
+    const eventPrivacy = validPrivacy.includes(privacy) ? privacy : "public";
+
     const newEvent = await Event.create({
       name,
       location,
@@ -470,6 +680,8 @@ app.post("/events", async (req: Request, res: Response) => {
       latitude,
       longitude,
       jerseyColors: jerseyColors || [],
+      privacy: eventPrivacy,
+      invitedUsers: invitedUsers || [],
     });
 
     res.status(201).json(newEvent);
@@ -493,6 +705,8 @@ app.put("/events/:id", async (req: Request, res: Response) => {
       latitude,
       longitude,
       jerseyColors,
+      privacy,
+      invitedUsers,
     } = req.body;
 
     const event = await Event.findById(eventId);
@@ -511,6 +725,17 @@ app.put("/events/:id", async (req: Request, res: Response) => {
     if (latitude !== undefined) event.latitude = latitude;
     if (longitude !== undefined) event.longitude = longitude;
     if (jerseyColors !== undefined) event.jerseyColors = jerseyColors;
+
+    // Update privacy settings
+    if (privacy !== undefined) {
+      const validPrivacy = ["public", "private", "invite-only"];
+      if (validPrivacy.includes(privacy)) {
+        event.privacy = privacy;
+      }
+    }
+    if (invitedUsers !== undefined) {
+      event.invitedUsers = invitedUsers;
+    }
 
     await event.save();
 
@@ -649,6 +874,116 @@ app.delete("/events/:id", async (req: Request, res: Response) => {
     res.status(500).json({ message: "Failed to delete event" });
   }
 });
+
+// Invite users to an event
+app.post("/events/:eventId/invite", async (req: Request, res: Response) => {
+  try {
+    const { userIds } = req.body; // Array of user IDs to invite
+    const currentUser = (req as any).user;
+
+    if (!currentUser || !currentUser.id) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+
+    if (!userIds || !Array.isArray(userIds) || userIds.length === 0) {
+      return res.status(400).json({ message: "User IDs array is required" });
+    }
+
+    const event = await Event.findById(req.params.eventId);
+    if (!event) {
+      return res.status(404).json({ message: "Event not found" });
+    }
+
+    // Only the creator can invite users (string comparison for ObjectId compatibility)
+    if (String(event.createdBy) !== String(currentUser.id)) {
+      return res
+        .status(403)
+        .json({ message: "Only the event creator can invite users" });
+    }
+
+    // Initialize invitedUsers if it doesn't exist
+    if (!event.invitedUsers) {
+      event.invitedUsers = [];
+    }
+
+    // Add new users to the invited list (avoid duplicates)
+    const newInvites: string[] = [];
+    userIds.forEach((userId: string) => {
+      if (!event.invitedUsers.includes(userId)) {
+        event.invitedUsers.push(userId);
+        newInvites.push(userId);
+      }
+    });
+
+    await event.save();
+
+    // Send push notifications to newly invited users
+    if (newInvites.length > 0) {
+      notificationService.sendPushNotificationToMany(
+        newInvites,
+        "Event Invitation 📩",
+        `You've been invited to "${event.name}"`,
+        "event_invitation",
+        {
+          eventId: event._id.toString(),
+          eventName: event.name,
+          invitedBy: currentUser.id,
+        },
+      );
+    }
+
+    res.status(200).json({
+      success: true,
+      invitedUsers: event.invitedUsers,
+      newlyInvited: newInvites.length,
+    });
+  } catch (error) {
+    console.error("Error inviting users to event:", error);
+    res.status(500).json({ message: "Failed to invite users" });
+  }
+});
+
+// Remove invite from an event
+app.delete(
+  "/events/:eventId/invite/:userId",
+  async (req: Request, res: Response) => {
+    try {
+      const currentUser = (req as any).user;
+      const { eventId, userId } = req.params;
+
+      if (!currentUser || !currentUser.id) {
+        return res.status(401).json({ message: "Authentication required" });
+      }
+
+      const event = await Event.findById(eventId);
+      if (!event) {
+        return res.status(404).json({ message: "Event not found" });
+      }
+
+      // Only the creator can remove invites (string comparison for ObjectId compatibility)
+      if (String(event.createdBy) !== String(currentUser.id)) {
+        return res
+          .status(403)
+          .json({ message: "Only the event creator can remove invites" });
+      }
+
+      // Remove user from invited list
+      event.invitedUsers = (event.invitedUsers || []).filter(
+        (id) => id !== userId,
+      );
+
+      await event.save();
+
+      res.status(200).json({
+        success: true,
+        invitedUsers: event.invitedUsers,
+      });
+    } catch (error) {
+      console.error("Error removing invite:", error);
+      res.status(500).json({ message: "Failed to remove invite" });
+    }
+  },
+);
 
 // Toggle like on an event
 app.post("/events/:eventId/like", async (req: Request, res: Response) => {
@@ -2246,7 +2581,7 @@ app.get("/auth/user-data", async (req: Request, res: Response) => {
         createdAt: event.createdAt,
       })),
       eventsJoined: eventsJoined
-        .filter((event: any) => event.createdBy !== userId) // Exclude events they created
+        .filter((event: any) => String(event.createdBy) !== userId) // Exclude events they created
         .map((event: any) => ({
           id: event._id,
           name: event.name,
@@ -2269,7 +2604,7 @@ app.get("/auth/user-data", async (req: Request, res: Response) => {
       statistics: {
         totalEventsCreated: eventsCreated.length,
         totalEventsJoined: eventsJoined.filter(
-          (e: any) => e.createdBy !== userId,
+          (e: any) => String(e.createdBy) !== userId,
         ).length,
         totalCommunityPosts: communityNotes.length,
         totalComments: userCommentsAndReplies.filter(

@@ -36,6 +36,8 @@ export interface IEvent extends Document {
   longitude?: number;
   jerseyColors?: string[]; // Team colors for the event
   likes: string[]; // Array of userIds who liked
+  privacy: "public" | "private" | "invite-only"; // Event visibility
+  invitedUsers: string[]; // Array of userIds invited (for invite-only events)
 }
 
 const EventSchema: Schema = new Schema(
@@ -54,6 +56,12 @@ const EventSchema: Schema = new Schema(
     longitude: { type: Number, required: false },
     jerseyColors: { type: [String], default: [] }, // Team colors for the event
     likes: { type: [String], default: [] }, // Array of userIds who liked
+    privacy: {
+      type: String,
+      enum: ["public", "private", "invite-only"],
+      default: "public",
+    }, // Event visibility
+    invitedUsers: { type: [String], default: [] }, // Array of userIds invited
   },
   { timestamps: true },
 );
