@@ -35,6 +35,7 @@ export interface IEvent extends Document {
   latitude?: number;
   longitude?: number;
   jerseyColors?: string[]; // Team colors for the event
+  likes: string[]; // Array of userIds who liked
 }
 
 const EventSchema: Schema = new Schema(
@@ -52,6 +53,7 @@ const EventSchema: Schema = new Schema(
     latitude: { type: Number, required: false },
     longitude: { type: Number, required: false },
     jerseyColors: { type: [String], default: [] }, // Team colors for the event
+    likes: { type: [String], default: [] }, // Array of userIds who liked
   },
   { timestamps: true },
 );

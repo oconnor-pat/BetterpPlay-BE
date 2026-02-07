@@ -351,8 +351,39 @@ app.post(
 // Get all events (include roster)
 app.get("/events", async (req: Request, res: Response) => {
   try {
-    const events = await Event.find();
-    res.status(200).json(events);
+    const events = await Event.find().lean();
+
+    // Collect all unique userIds from event likes
+    const userIds = new Set<string>();
+    events.forEach((event: any) => {
+      event.likes?.forEach((id: string) => userIds.add(String(id)));
+    });
+
+    // Fetch usernames for all likers
+    const objectIds = Array.from(userIds).map((id) => {
+      try {
+        return new mongoose.Types.ObjectId(id);
+      } catch {
+        return id;
+      }
+    });
+    const users = await User.find({ _id: { $in: objectIds } })
+      .select("username")
+      .lean();
+    const userNameMap = new Map<string, string>();
+    users.forEach((u: any) => {
+      userNameMap.set(u._id.toString(), u.username || "");
+    });
+
+    // Add likedByUsernames to each event
+    const eventsWithLikedBy = events.map((event: any) => ({
+      ...event,
+      likedByUsernames: (event.likes || [])
+        .map((id: string) => userNameMap.get(String(id)))
+        .filter((name: string | undefined): name is string => !!name),
+    }));
+
+    res.status(200).json(eventsWithLikedBy);
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch events" });
   }
@@ -361,11 +392,30 @@ app.get("/events", async (req: Request, res: Response) => {
 // Get a single event (include roster)
 app.get("/events/:id", async (req: Request, res: Response) => {
   try {
-    const event = await Event.findById(req.params.id);
+    const event = await Event.findById(req.params.id).lean();
     if (!event) {
       return res.status(404).json({ message: "Event not found" });
     }
-    res.status(200).json(event);
+
+    // Fetch usernames for likers
+    const likerIds = ((event as any).likes || []).map((id: string) => {
+      try {
+        return new mongoose.Types.ObjectId(id);
+      } catch {
+        return id;
+      }
+    });
+    const likers = await User.find({ _id: { $in: likerIds } })
+      .select("username")
+      .lean();
+    const likedByUsernames = ((event as any).likes || [])
+      .map((id: string) => {
+        const user = likers.find((u: any) => u._id.toString() === String(id));
+        return user?.username;
+      })
+      .filter((name: string | undefined): name is string => !!name);
+
+    res.status(200).json({ ...event, likedByUsernames });
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch event" });
   }
@@ -597,6 +647,65 @@ app.delete("/events/:id", async (req: Request, res: Response) => {
     res.sendStatus(204);
   } catch (error) {
     res.status(500).json({ message: "Failed to delete event" });
+  }
+});
+
+// Toggle like on an event
+app.post("/events/:eventId/like", async (req: Request, res: Response) => {
+  try {
+    // Support both: userId from body OR from authenticated user (JWT)
+    let userId = req.body.userId;
+    if (!userId) {
+      const user = (req as any).user;
+      if (user && user.id) {
+        userId = user.id;
+      }
+    }
+
+    if (!userId) {
+      return res.status(400).json({ message: "Missing userId." });
+    }
+
+    const event = await Event.findById(req.params.eventId);
+    if (!event) {
+      return res.status(404).json({ message: "Event not found." });
+    }
+
+    // Initialize likes array if it doesn't exist
+    if (!event.likes) {
+      event.likes = [];
+    }
+
+    const likeIndex = event.likes.indexOf(userId);
+    if (likeIndex === -1) {
+      event.likes.push(userId);
+    } else {
+      event.likes.splice(likeIndex, 1);
+    }
+    await event.save();
+
+    // Fetch usernames for all users who liked
+    const likerIds = event.likes.map((id: string) => {
+      try {
+        return new mongoose.Types.ObjectId(id);
+      } catch {
+        return id;
+      }
+    });
+    const likers = await User.find({ _id: { $in: likerIds } })
+      .select("username")
+      .lean();
+    const likedByUsernames = event.likes
+      .map((id: string) => {
+        const user = likers.find((u: any) => u._id.toString() === String(id));
+        return user?.username;
+      })
+      .filter((name: string | undefined): name is string => !!name);
+
+    res.status(200).json({ likes: event.likes, likedByUsernames });
+  } catch (error) {
+    console.error("Error toggling event like:", error);
+    res.status(500).json({ message: "Failed to toggle like on event." });
   }
 });
 
@@ -2917,11 +3026,44 @@ app.get("/users/:userId/friend-status", async (req: Request, res: Response) => {
 app.get("/user/:id/events/created", async (req: Request, res: Response) => {
   try {
     const userId = req.params.id;
-    const events = await Event.find({ createdBy: userId }).sort({ date: -1 });
+    const events = await Event.find({ createdBy: userId })
+      .sort({ date: -1 })
+      .lean();
+
+    // Collect all unique userIds from event likes
+    const userIds = new Set<string>();
+    events.forEach((event: any) => {
+      event.likes?.forEach((id: string) => userIds.add(String(id)));
+    });
+
+    // Fetch usernames for all likers
+    const objectIds = Array.from(userIds).map((id) => {
+      try {
+        return new mongoose.Types.ObjectId(id);
+      } catch {
+        return id;
+      }
+    });
+    const users = await User.find({ _id: { $in: objectIds } })
+      .select("username")
+      .lean();
+    const userNameMap = new Map<string, string>();
+    users.forEach((u: any) => {
+      userNameMap.set(u._id.toString(), u.username || "");
+    });
+
+    // Add likedByUsernames to each event
+    const eventsWithLikedBy = events.map((event: any) => ({
+      ...event,
+      likedByUsernames: (event.likes || [])
+        .map((id: string) => userNameMap.get(String(id)))
+        .filter((name: string | undefined): name is string => !!name),
+    }));
+
     return res.status(200).json({
       success: true,
-      events,
-      count: events.length,
+      events: eventsWithLikedBy,
+      count: eventsWithLikedBy.length,
     });
   } catch (error) {
     console.error("Error fetching created events:", error);
@@ -2944,12 +3086,44 @@ app.get("/user/:id/events/joined", async (req: Request, res: Response) => {
     const events = await Event.find({
       "roster.username": user.username,
       createdBy: { $ne: userId }, // Exclude events they created
-    }).sort({ date: -1 });
+    })
+      .sort({ date: -1 })
+      .lean();
+
+    // Collect all unique userIds from event likes
+    const likerIds = new Set<string>();
+    events.forEach((event: any) => {
+      event.likes?.forEach((id: string) => likerIds.add(String(id)));
+    });
+
+    // Fetch usernames for all likers
+    const objectIds = Array.from(likerIds).map((id) => {
+      try {
+        return new mongoose.Types.ObjectId(id);
+      } catch {
+        return id;
+      }
+    });
+    const users = await User.find({ _id: { $in: objectIds } })
+      .select("username")
+      .lean();
+    const userNameMap = new Map<string, string>();
+    users.forEach((u: any) => {
+      userNameMap.set(u._id.toString(), u.username || "");
+    });
+
+    // Add likedByUsernames to each event
+    const eventsWithLikedBy = events.map((event: any) => ({
+      ...event,
+      likedByUsernames: (event.likes || [])
+        .map((id: string) => userNameMap.get(String(id)))
+        .filter((name: string | undefined): name is string => !!name),
+    }));
 
     return res.status(200).json({
       success: true,
-      events,
-      count: events.length,
+      events: eventsWithLikedBy,
+      count: eventsWithLikedBy.length,
     });
   } catch (error) {
     console.error("Error fetching joined events:", error);
@@ -3129,7 +3303,7 @@ app.get(
   async (req: Request, res: Response) => {
     try {
       const { eventId } = req.params;
-      const post = await communityNote.findOne({ eventId });
+      const post = await communityNote.findOne({ eventId }).lean();
 
       if (!post) {
         return res
@@ -3137,7 +3311,77 @@ app.get(
           .json({ message: "No post found for this event." });
       }
 
-      res.status(200).json(post);
+      // Collect all unique userIds from the post, comments, replies, AND likes
+      const userIds = new Set<string>();
+      if ((post as any).userId) userIds.add(String((post as any).userId));
+      // Add post likers
+      (post as any).likes?.forEach((id: string) => userIds.add(String(id)));
+      (post as any).comments?.forEach((comment: any) => {
+        if (comment.userId) userIds.add(String(comment.userId));
+        // Add comment likers
+        comment.likes?.forEach((id: string) => userIds.add(String(id)));
+        comment.replies?.forEach((reply: any) => {
+          if (reply.userId) userIds.add(String(reply.userId));
+          // Add reply likers
+          reply.likes?.forEach((id: string) => userIds.add(String(id)));
+        });
+      });
+
+      // Convert string IDs to ObjectIds for MongoDB query
+      const objectIds = Array.from(userIds).map((id) => {
+        try {
+          return new mongoose.Types.ObjectId(id);
+        } catch {
+          return id;
+        }
+      });
+
+      // Fetch all users and create lookup maps
+      const users = await User.find({ _id: { $in: objectIds } }).lean();
+
+      // Map for profile pictures
+      const userPicMap = new Map<string, string>();
+      // Map for usernames (for likedByUsernames)
+      const userNameMap = new Map<string, string>();
+      users.forEach((u: any) => {
+        userPicMap.set(u._id.toString(), u.profilePicUrl || "");
+        userNameMap.set(u._id.toString(), u.username || "");
+      });
+
+      // Helper function to get likedByUsernames from likes array
+      const getLikedByUsernames = (likes: string[] | undefined): string[] => {
+        if (!likes || likes.length === 0) return [];
+        return likes
+          .map((id) => userNameMap.get(String(id)))
+          .filter((name): name is string => !!name);
+      };
+
+      // Populate profilePicUrl and likedByUsernames for post, comments, and replies
+      const postWithDetails = {
+        ...(post as any),
+        profilePicUrl: userPicMap.get(String((post as any).userId)) || "",
+        likedByUsernames: getLikedByUsernames((post as any).likes),
+        comments: (post as any).comments?.map((comment: any) => {
+          const commentUserId = String(comment.userId);
+          const commentPic = userPicMap.get(commentUserId) || "";
+          return {
+            ...comment,
+            profilePicUrl: commentPic,
+            likedByUsernames: getLikedByUsernames(comment.likes),
+            replies: comment.replies?.map((reply: any) => {
+              const replyUserId = String(reply.userId);
+              const replyPic = userPicMap.get(replyUserId) || "";
+              return {
+                ...reply,
+                profilePicUrl: replyPic,
+                likedByUsernames: getLikedByUsernames(reply.likes),
+              };
+            }),
+          };
+        }),
+      };
+
+      res.status(200).json(postWithDetails);
     } catch (error) {
       console.error("❌ Error fetching community note by event:", error);
       res.status(500).json({ message: "Failed to fetch post." });
