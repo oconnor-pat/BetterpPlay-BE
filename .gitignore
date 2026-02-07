@@ -4,6 +4,9 @@ node_modules
 # Environment variables
 .env
 
+# Firebase service account credentials (keep locally, deploy via env vars)
+betterplay-fa87c-firebase-adminsdk-fbsvc-*.json
+
 # Logs
 logs
 *.log

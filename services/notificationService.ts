@@ -1,61 +1,112 @@
 import admin from "firebase-admin";
+import fs from "fs";
+import path from "path";
 import DeviceToken from "../models/deviceToken";
 import NotificationPreferences from "../models/notificationPreferences";
 import Notification from "../models/notification";
 
 // Initialize Firebase Admin SDK
-// Credentials should be set via environment variables:
-// FIREBASE_PROJECT_ID, FIREBASE_PRIVATE_KEY, FIREBASE_CLIENT_EMAIL
+// Priority: Service account JSON file (local dev) > Environment variables (Heroku)
 const initializeFirebase = () => {
   if (admin.apps.length === 0) {
-    // Handle both escaped newlines (\\n) and already-parsed newlines
-    let privateKey = process.env.FIREBASE_PRIVATE_KEY;
-    if (privateKey) {
-      // Replace literal \n with actual newlines (handles Heroku env var escaping)
-      privateKey = privateKey.replace(/\\n/g, "\n");
-      // Also handle double-escaped newlines (\\\\n)
-      privateKey = privateKey.replace(/\\\\n/g, "\n");
+    let credentials: {
+      projectId: string;
+      privateKey: string;
+      clientEmail: string;
+    } | null = null;
+
+    // 1. Try loading from service account JSON file (local development)
+    const serviceAccountPath = path.join(
+      __dirname,
+      "..",
+      "betterplay-fa87c-firebase-adminsdk-fbsvc-074f4b1357.json",
+    );
+
+    if (fs.existsSync(serviceAccountPath)) {
+      try {
+        const serviceAccount = JSON.parse(
+          fs.readFileSync(serviceAccountPath, "utf8"),
+        );
+        credentials = {
+          projectId: serviceAccount.project_id,
+          privateKey: serviceAccount.private_key,
+          clientEmail: serviceAccount.client_email,
+        };
+        console.log(
+          "Firebase credentials loaded from service account JSON file",
+        );
+      } catch (error) {
+        console.error(
+          "Failed to load service account JSON file:",
+          error instanceof Error ? error.message : "Unknown error",
+        );
+      }
     }
 
-    if (
-      !process.env.FIREBASE_PROJECT_ID ||
-      !privateKey ||
-      !process.env.FIREBASE_CLIENT_EMAIL
-    ) {
+    // 2. Fallback to environment variables (Heroku deployment)
+    if (!credentials) {
+      let privateKey = process.env.FIREBASE_PRIVATE_KEY;
+      if (privateKey) {
+        // Replace literal \n with actual newlines (handles Heroku env var escaping)
+        privateKey = privateKey.replace(/\\n/g, "\n");
+        // Also handle double-escaped newlines (\\\\n)
+        privateKey = privateKey.replace(/\\\\n/g, "\n");
+      }
+
+      if (
+        process.env.FIREBASE_PROJECT_ID &&
+        privateKey &&
+        process.env.FIREBASE_CLIENT_EMAIL
+      ) {
+        credentials = {
+          projectId: process.env.FIREBASE_PROJECT_ID,
+          privateKey: privateKey,
+          clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+        };
+        console.log("Firebase credentials loaded from environment variables");
+      }
+    }
+
+    // Check if credentials were loaded
+    if (!credentials) {
       console.warn(
         "Firebase credentials not configured. Push notifications will be disabled.",
       );
-      console.warn("Missing:", {
-        hasProjectId: !!process.env.FIREBASE_PROJECT_ID,
-        hasPrivateKey: !!privateKey,
-        hasClientEmail: !!process.env.FIREBASE_CLIENT_EMAIL,
+      console.warn("Tried:", {
+        serviceAccountFile: serviceAccountPath,
+        hasEnvProjectId: !!process.env.FIREBASE_PROJECT_ID,
+        hasEnvPrivateKey: !!process.env.FIREBASE_PRIVATE_KEY,
+        hasEnvClientEmail: !!process.env.FIREBASE_CLIENT_EMAIL,
       });
       return false;
     }
 
     // Validate private key format
     if (
-      !privateKey.includes("-----BEGIN") ||
-      !privateKey.includes("PRIVATE KEY-----")
+      !credentials.privateKey.includes("-----BEGIN") ||
+      !credentials.privateKey.includes("PRIVATE KEY-----")
     ) {
       console.error(
         "FIREBASE_PRIVATE_KEY appears to be malformed. Expected PEM format.",
       );
-      console.error("Key starts with:", privateKey.substring(0, 50));
+      console.error(
+        "Key starts with:",
+        credentials.privateKey.substring(0, 50),
+      );
       return false;
     }
 
     try {
       admin.initializeApp({
         credential: admin.credential.cert({
-          projectId: process.env.FIREBASE_PROJECT_ID,
-          privateKey: privateKey,
-          clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+          projectId: credentials.projectId,
+          privateKey: credentials.privateKey,
+          clientEmail: credentials.clientEmail,
         }),
       });
       console.log("Firebase Admin SDK initialized successfully");
-      console.log("Project ID:", process.env.FIREBASE_PROJECT_ID);
-      console.log("Client Email:", process.env.FIREBASE_CLIENT_EMAIL);
+      console.log("Project ID:", credentials.projectId);
+      console.log("Client Email:", credentials.clientEmail);
       return true;
     } catch (error) {
       console.error("Failed to initialize Firebase Admin SDK:", error);
