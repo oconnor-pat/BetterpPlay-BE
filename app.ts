@@ -656,6 +656,75 @@ app.post("/events", async (req: Request, res: Response) => {
       return res.status(400).json({ message: "Missing required fields" });
     }
 
+    // Validate eventType against allowed activity categories
+    const VALID_EVENT_TYPES = [
+      // Sports
+      "Basketball",
+      "Soccer",
+      "Football",
+      "Baseball",
+      "Softball",
+      "Tennis",
+      "Pickleball",
+      "Volleyball",
+      "Hockey",
+      "Golf",
+      "Swimming",
+      "Running",
+      "Bowling",
+      "Table Tennis",
+      "Badminton",
+      "Cricket",
+      "Rugby",
+      "Lacrosse",
+      "Wrestling",
+      "Skateboarding",
+      "Surfing",
+      "Climbing",
+      "Martial Arts",
+      "Frisbee",
+      "Handball",
+      // Social
+      "Trivia Night",
+      "Game Night",
+      "Karaoke",
+      "Open Mic",
+      "Watch Party",
+      "Potluck",
+      "Meetup",
+      "Happy Hour",
+      "Dance Social",
+      "Speed Friending",
+      // Outdoor
+      "Hiking",
+      "Cycling",
+      "Yoga in the Park",
+      "Kayaking",
+      "Fishing",
+      "Camping",
+      "Trail Running",
+      "Bird Watching",
+      "Beach Day",
+      "Outdoor Yoga",
+      // Community
+      "Book Club",
+      "Workshop",
+      "Volunteer",
+      "Cleanup",
+      "Fundraiser",
+      "Study Group",
+      "Art Jam",
+      "Farmers Market",
+      "Community Garden",
+      "Skill Share",
+      // Custom / catch-all
+      "Other",
+    ];
+
+    if (!VALID_EVENT_TYPES.includes(eventType)) {
+      console.warn(`Unrecognized eventType: "${eventType}" — allowing anyway`);
+    }
+
     // Optionally, validate that createdBy is a valid user
     const user = await User.findById(createdBy);
     if (!user) {
@@ -739,15 +808,15 @@ app.put("/events/:id", async (req: Request, res: Response) => {
 
     await event.save();
 
-    // Send notifications to all players in the roster about the event update
+    // Send notifications to all participants in the roster about the event update
     if (event.roster && event.roster.length > 0) {
-      const playerUserIds = event.roster
+      const participantUserIds = event.roster
         .filter((p: any) => p.userId)
         .map((p: any) => p.userId);
 
-      if (playerUserIds.length > 0) {
+      if (participantUserIds.length > 0) {
         notificationService.sendPushNotificationToMany(
-          playerUserIds,
+          participantUserIds,
           "Event Updated",
           `Event "${event.name}" has been updated`,
           "event_update",
@@ -762,30 +831,31 @@ app.put("/events/:id", async (req: Request, res: Response) => {
   }
 });
 
-// Add a player to the roster (append, not overwrite)
+// Add a participant to the roster (append, not overwrite)
 app.post("/events/:id/roster", async (req: Request, res: Response) => {
   const eventId = req.params.id;
-  const { player } = req.body; // player: { username, paidStatus, jerseyColor, position }
-  if (!player || !player.username) {
-    return res.status(400).json({ message: "Missing player data" });
+  const { player, participant } = req.body; // Accept both old and new field names
+  const entry = participant || player; // participant: { username, paidStatus, jerseyColor?, position?, role? }
+  if (!entry || !entry.username) {
+    return res.status(400).json({ message: "Missing participant data" });
   }
   try {
     const event = await Event.findById(eventId);
     if (!event) {
       return res.status(404).json({ message: "Event not found" });
     }
-    // Prevent duplicate usernames (optional)
-    if (event.roster.some((p: any) => p.username === player.username)) {
-      return res.status(409).json({ message: "Player already in roster" });
+    // Prevent duplicate usernames
+    if (event.roster.some((p: any) => p.username === entry.username)) {
+      return res.status(409).json({ message: "Participant already in roster" });
     }
-    event.roster.push(player);
+    event.roster.push(entry);
     event.rosterSpotsFilled = event.roster.length;
     await event.save();
 
-    // Send notification to the player being added to the roster
-    if (player.userId) {
+    // Send notification to the participant being added to the roster
+    if (entry.userId) {
       notificationService.sendPushNotification({
-        userId: player.userId,
+        userId: entry.userId,
         title: "Added to Event",
         body: `You've been added to "${event.name}"`,
         type: "event_roster",
@@ -795,12 +865,14 @@ app.post("/events/:id/roster", async (req: Request, res: Response) => {
 
     return res.status(200).json({ success: true, roster: event.roster });
   } catch (error) {
-    console.error("Error adding player to roster:", error);
-    return res.status(500).json({ message: "Error adding player to roster" });
+    console.error("Error adding participant to roster:", error);
+    return res
+      .status(500)
+      .json({ message: "Error adding participant to roster" });
   }
 });
 
-// Remove a player from the roster
+// Remove a participant from the roster
 app.delete(
   "/events/:id/roster/:username",
   async (req: Request, res: Response) => {
@@ -814,16 +886,18 @@ app.delete(
       const initialLength = event.roster.length;
       event.roster = event.roster.filter((p: any) => p.username !== username);
       if (event.roster.length === initialLength) {
-        return res.status(404).json({ message: "Player not found in roster" });
+        return res
+          .status(404)
+          .json({ message: "Participant not found in roster" });
       }
       event.rosterSpotsFilled = event.roster.length;
       await event.save();
       return res.status(200).json({ success: true, roster: event.roster });
     } catch (error) {
-      console.error("Error removing player from roster:", error);
+      console.error("Error removing participant from roster:", error);
       return res
         .status(500)
-        .json({ message: "Error removing player from roster" });
+        .json({ message: "Error removing participant from roster" });
     }
   },
 );
@@ -2773,7 +2847,7 @@ app.delete("/auth/delete-account", async (req: Request, res: Response) => {
 // User API to get all users (excluding passwords) with optional search and filtering
 app.get("/users", async (req: Request, res: Response) => {
   try {
-    const { search, sport } = req.query;
+    const { search, sport, activity } = req.query;
     const currentUser = (req as any).user;
 
     // Build query filter
@@ -2784,9 +2858,10 @@ app.get("/users", async (req: Request, res: Response) => {
       filter.username = { $regex: search, $options: "i" };
     }
 
-    // Filter by favorite sport
-    if (sport && typeof sport === "string") {
-      filter.favoriteSports = sport;
+    // Filter by favorite activity (supports both ?activity= and legacy ?sport=)
+    const activityFilter = activity || sport;
+    if (activityFilter && typeof activityFilter === "string") {
+      filter.favoriteActivities = activityFilter;
     }
 
     const users = await User.find(filter).select("-password");
@@ -2829,7 +2904,7 @@ app.get("/users", async (req: Request, res: Response) => {
           email: user.email,
           username: user.username,
           profilePicUrl: user.profilePicUrl,
-          favoriteSports: user.favoriteSports,
+          favoriteActivities: user.favoriteActivities,
           eventsCreated,
           eventsJoined,
           friendStatus,
@@ -2882,34 +2957,100 @@ app.put("/user/profile-pic", async (req: Request, res: Response) => {
   }
 });
 
-// ==================== FAVORITE SPORTS ENDPOINTS ====================
+// ==================== FAVORITE ACTIVITIES ENDPOINTS ====================
 
-// Get user's favorite sports
+// Get user's favorite activities
+app.get(
+  "/user/:id/favorite-activities",
+  async (req: Request, res: Response) => {
+    try {
+      const user = await User.findById(req.params.id).select(
+        "favoriteActivities",
+      );
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      return res.status(200).json({
+        success: true,
+        favoriteActivities: user.favoriteActivities || [],
+      });
+    } catch (error) {
+      console.error("Error fetching favorite activities:", error);
+      return res
+        .status(500)
+        .json({ message: "Failed to fetch favorite activities" });
+    }
+  },
+);
+
+// Backward-compatible alias for GET /user/:id/favorite-sports
 app.get("/user/:id/favorite-sports", async (req: Request, res: Response) => {
   try {
-    const user = await User.findById(req.params.id).select("favoriteSports");
+    const user = await User.findById(req.params.id).select(
+      "favoriteActivities",
+    );
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
     return res.status(200).json({
       success: true,
-      favoriteSports: user.favoriteSports || [],
+      favoriteSports: user.favoriteActivities || [],
+      favoriteActivities: user.favoriteActivities || [],
     });
   } catch (error) {
-    console.error("Error fetching favorite sports:", error);
-    return res.status(500).json({ message: "Failed to fetch favorite sports" });
+    console.error("Error fetching favorite activities:", error);
+    return res
+      .status(500)
+      .json({ message: "Failed to fetch favorite activities" });
   }
 });
 
-// Update user's favorite sports
+// Update user's favorite activities
+app.put(
+  "/user/:id/favorite-activities",
+  async (req: Request, res: Response) => {
+    try {
+      const { favoriteActivities } = req.body;
+
+      if (!Array.isArray(favoriteActivities)) {
+        return res
+          .status(400)
+          .json({ message: "favoriteActivities must be an array" });
+      }
+
+      const user = await User.findById(req.params.id);
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+
+      user.favoriteActivities = favoriteActivities;
+      await user.save();
+
+      return res.status(200).json({
+        success: true,
+        message: "Favorite activities updated successfully",
+        favoriteActivities: user.favoriteActivities,
+      });
+    } catch (error) {
+      console.error("Error updating favorite activities:", error);
+      return res
+        .status(500)
+        .json({ message: "Failed to update favorite activities" });
+    }
+  },
+);
+
+// Backward-compatible alias for PUT /user/:id/favorite-sports
 app.put("/user/:id/favorite-sports", async (req: Request, res: Response) => {
   try {
-    const { favoriteSports } = req.body;
+    // Accept both old and new field names
+    const { favoriteSports, favoriteActivities } = req.body;
+    const activities = favoriteActivities || favoriteSports;
 
-    if (!Array.isArray(favoriteSports)) {
+    if (!Array.isArray(activities)) {
       return res
         .status(400)
-        .json({ message: "favoriteSports must be an array" });
+        .json({ message: "favoriteActivities must be an array" });
     }
 
     const user = await User.findById(req.params.id);
@@ -2917,23 +3058,24 @@ app.put("/user/:id/favorite-sports", async (req: Request, res: Response) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    user.favoriteSports = favoriteSports;
+    user.favoriteActivities = activities;
     await user.save();
 
     return res.status(200).json({
       success: true,
-      message: "Favorite sports updated successfully",
-      favoriteSports: user.favoriteSports,
+      message: "Favorite activities updated successfully",
+      favoriteSports: user.favoriteActivities,
+      favoriteActivities: user.favoriteActivities,
     });
   } catch (error) {
-    console.error("Error updating favorite sports:", error);
+    console.error("Error updating favorite activities:", error);
     return res
       .status(500)
-      .json({ message: "Failed to update favorite sports" });
+      .json({ message: "Failed to update favorite activities" });
   }
 });
 
-// ==================== END FAVORITE SPORTS ENDPOINTS ====================
+// ==================== END FAVORITE ACTIVITIES ENDPOINTS ====================
 
 // ==================== FRIENDS ENDPOINTS ====================
 
@@ -2968,7 +3110,7 @@ app.get("/users/me/friends", async (req: Request, res: Response) => {
           name: friend.name,
           username: friend.username,
           profilePicUrl: friend.profilePicUrl,
-          favoriteSports: friend.favoriteSports,
+          favoriteActivities: friend.favoriteActivities,
           eventsCreated,
           eventsJoined,
         };
@@ -3138,7 +3280,7 @@ app.get(
           name: requester.name,
           username: requester.username,
           profilePicUrl: requester.profilePicUrl,
-          favoriteSports: requester.favoriteSports,
+          favoriteActivities: requester.favoriteActivities,
         }),
       );
 
@@ -3176,7 +3318,7 @@ app.get(
           name: recipient.name,
           username: recipient.username,
           profilePicUrl: recipient.profilePicUrl,
-          favoriteSports: recipient.favoriteSports,
+          favoriteActivities: recipient.favoriteActivities,
         }),
       );
 

@@ -8,7 +8,7 @@ export interface IUser extends Document {
   profilePicUrl: string;
   tokenVersion: number;
   isAdmin: boolean;
-  favoriteSports: string[];
+  favoriteActivities: string[];
   friends: mongoose.Types.ObjectId[];
   friendRequestsSent: mongoose.Types.ObjectId[];
   friendRequestsReceived: mongoose.Types.ObjectId[];
@@ -23,7 +23,7 @@ const UserSchema: Schema = new Schema(
     profilePicUrl: { type: String }, // URL of the user's profile picture stored in S3
     tokenVersion: { type: Number, default: 0 }, // Increment to invalidate all tokens
     isAdmin: { type: Boolean, default: false }, // Admin flag for venue management
-    favoriteSports: { type: [String], default: [] }, // User's favorite sports
+    favoriteActivities: { type: [String], default: [] }, // User's favorite activities
     friends: [{ type: Schema.Types.ObjectId, ref: "Users", default: [] }],
     friendRequestsSent: [
       { type: Schema.Types.ObjectId, ref: "Users", default: [] },

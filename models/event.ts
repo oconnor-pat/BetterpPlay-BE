@@ -1,20 +1,22 @@
 import mongoose, { Document, Schema } from "mongoose";
 
-export interface IPlayer {
+export interface IParticipant {
   username: string;
   paidStatus: string;
-  jerseyColor: string;
-  position: string;
-  profilePicUrl?: string; // Player's profile picture URL
-  userId?: string; // Player's user ID for profile navigation
+  jerseyColor?: string;
+  position?: string;
+  role?: string; // Generic role for non-sport events (e.g. "host", "volunteer")
+  profilePicUrl?: string; // Participant's profile picture URL
+  userId?: string; // Participant's user ID for profile navigation
 }
 
-const PlayerSchema: Schema = new Schema(
+const ParticipantSchema: Schema = new Schema(
   {
     username: { type: String, required: true },
     paidStatus: { type: String, required: true },
-    jerseyColor: { type: String, required: true },
-    position: { type: String, required: true },
+    jerseyColor: { type: String, required: false },
+    position: { type: String, required: false },
+    role: { type: String, required: false },
     profilePicUrl: { type: String, required: false },
     userId: { type: String, required: false },
   },
@@ -31,10 +33,10 @@ export interface IEvent extends Document {
   eventType: string;
   createdBy: string;
   createdByUsername?: string; // <-- Added field
-  roster: IPlayer[];
+  roster: IParticipant[];
   latitude?: number;
   longitude?: number;
-  jerseyColors?: string[]; // Team colors for the event
+  jerseyColors?: string[]; // Team colors (for sports events)
   likes: string[]; // Array of userIds who liked
   privacy: "public" | "private" | "invite-only"; // Event visibility
   invitedUsers: string[]; // Array of userIds invited (for invite-only events)
@@ -51,10 +53,10 @@ const EventSchema: Schema = new Schema(
     eventType: { type: String, required: true },
     createdBy: { type: String, required: true },
     createdByUsername: { type: String }, // <-- Added field
-    roster: { type: [PlayerSchema], default: [] },
+    roster: { type: [ParticipantSchema], default: [] },
     latitude: { type: Number, required: false },
     longitude: { type: Number, required: false },
-    jerseyColors: { type: [String], default: [] }, // Team colors for the event
+    jerseyColors: { type: [String], default: [] }, // Team colors (for sports events)
     likes: { type: [String], default: [] }, // Array of userIds who liked
     privacy: {
       type: String,
