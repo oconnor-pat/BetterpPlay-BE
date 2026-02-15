@@ -25,6 +25,9 @@ const app: Application = express();
 // Enable CORS for all origins (development)
 app.use(cors());
 
+// Trust Heroku's reverse proxy so req.protocol returns 'https'
+app.set("trust proxy", 1);
+
 // Configure env
 dotenv.config();
 
@@ -2429,9 +2432,9 @@ app.post("/auth/forgot-password", async (req: Request, res: Response) => {
       },
     });
 
-    // Build reset link - use FRONTEND_URL or auto-detect from request
+    // Build reset link - use APP_URL (set on Heroku) or auto-detect from request
     const baseUrl =
-      process.env.FRONTEND_URL || `${req.protocol}://${req.get("host")}`;
+      process.env.APP_URL || `${req.protocol}://${req.get("host")}`;
     const resetLink = `${baseUrl}/reset-password?token=${resetToken}`;
 
     await transporter.sendMail({
@@ -2461,25 +2464,29 @@ app.post("/auth/forgot-password", async (req: Request, res: Response) => {
 // Deep link redirect for password reset (opens the app)
 app.get("/reset-password", (req: Request, res: Response) => {
   const { token } = req.query;
-
-  // Redirect to the app's deep link
   const deepLink = `betterplay://reset-password?token=${token}`;
 
-  // HTML page that redirects to the app
   res.send(`
     <!DOCTYPE html>
     <html>
     <head>
       <title>Reset Password - BetterPlay</title>
-      <meta http-equiv="refresh" content="0;url=${deepLink}">
+      <meta name="viewport" content="width=device-width, initial-scale=1">
       <style>
-        body { font-family: -apple-system, sans-serif; text-align: center; padding: 50px; }
-        a { color: #007AFF; }
+        body { font-family: -apple-system, sans-serif; text-align: center; padding: 50px 20px; background: #1a1a2e; color: #fff; }
+        .btn { display: inline-block; padding: 14px 28px; background: #10B981; color: #fff; text-decoration: none; border-radius: 8px; font-size: 17px; font-weight: 600; margin-top: 20px; }
+        p { color: #aaa; margin-top: 16px; }
       </style>
     </head>
     <body>
-      <h2>Redirecting to BetterPlay...</h2>
-      <p>If the app doesn't open automatically, <a href="${deepLink}">tap here</a>.</p>
+      <h2>Reset Your Password</h2>
+      <p>Tap the button below to open BetterPlay and reset your password.</p>
+      <a href="${deepLink}" class="btn">Open BetterPlay</a>
+      <p style="font-size: 13px; margin-top: 30px;">If the app doesn't open, make sure BetterPlay is installed on your device.</p>
+      <script>
+        // Attempt automatic redirect via JavaScript (more reliable than meta refresh)
+        window.location.href = "${deepLink}";
+      </script>
     </body>
     </html>
   `);
