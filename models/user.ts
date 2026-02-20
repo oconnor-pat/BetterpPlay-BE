@@ -12,6 +12,11 @@ export interface IUser extends Document {
   friends: mongoose.Types.ObjectId[];
   friendRequestsSent: mongoose.Types.ObjectId[];
   friendRequestsReceived: mongoose.Types.ObjectId[];
+  location?: {
+    type: "Point";
+    coordinates: [number, number];
+  } | null;
+  proximityVisibility: "public" | "friends" | "private";
 }
 
 const UserSchema: Schema = new Schema(
@@ -31,9 +36,20 @@ const UserSchema: Schema = new Schema(
     friendRequestsReceived: [
       { type: Schema.Types.ObjectId, ref: "Users", default: [] },
     ],
+    location: {
+      type: { type: String, enum: ["Point"], default: "Point" },
+      coordinates: { type: [Number] },
+    },
+    proximityVisibility: {
+      type: String,
+      enum: ["public", "friends", "private"],
+      default: "private",
+    },
   },
   { timestamps: true },
 );
+
+UserSchema.index({ location: "2dsphere" });
 
 const User = mongoose.model<IUser>("Users", UserSchema);
 

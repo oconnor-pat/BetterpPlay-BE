@@ -2851,27 +2851,139 @@ app.delete("/auth/delete-account", async (req: Request, res: Response) => {
   }
 });
 
+// Update current user's location (or clear it)
+app.put("/users/me/location", async (req: Request, res: Response) => {
+  try {
+    const currentUser = (req as any).user;
+    if (!currentUser || !currentUser.id) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+
+    const { latitude, longitude } = req.body;
+
+    let location = null;
+    if (latitude != null && longitude != null) {
+      location = {
+        type: "Point" as const,
+        coordinates: [parseFloat(longitude), parseFloat(latitude)],
+      };
+    }
+
+    await User.findByIdAndUpdate(currentUser.id, { location });
+
+    return res
+      .status(200)
+      .json({ success: true, message: "Location updated successfully" });
+  } catch (error) {
+    console.error("Failed to update location:", error);
+    return res.status(500).json({ message: "Failed to update location" });
+  }
+});
+
+// Update current user's proximity visibility setting
+app.put("/users/me/proximity-visibility", async (req: Request, res: Response) => {
+  try {
+    const currentUser = (req as any).user;
+    if (!currentUser || !currentUser.id) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+
+    const { proximityVisibility } = req.body;
+    const allowed = ["public", "friends", "private"];
+    if (!allowed.includes(proximityVisibility)) {
+      return res.status(400).json({
+        message: "proximityVisibility must be one of: public, friends, private",
+      });
+    }
+
+    await User.findByIdAndUpdate(currentUser.id, { proximityVisibility });
+
+    return res.status(200).json({
+      success: true,
+      message: "Proximity visibility updated successfully",
+    });
+  } catch (error) {
+    console.error("Failed to update proximity visibility:", error);
+    return res
+      .status(500)
+      .json({ message: "Failed to update proximity visibility" });
+  }
+});
+
 // User API to get all users (excluding passwords) with optional search and filtering
 app.get("/users", async (req: Request, res: Response) => {
   try {
-    const { search, sport, activity } = req.query;
+    const { search, sport, activity, lat, lng, maxDistance } = req.query;
     const currentUser = (req as any).user;
 
-    // Build query filter
-    let filter: any = {};
+    const useProximity = lat && lng && maxDistance;
 
-    // Search by username (case-insensitive partial match)
-    if (search && typeof search === "string") {
-      filter.username = { $regex: search, $options: "i" };
+    let users: any[];
+
+    if (useProximity) {
+      const maxDistanceMeters = parseFloat(maxDistance as string) * 1609.34;
+
+      const pipeline: any[] = [
+        {
+          $geoNear: {
+            near: {
+              type: "Point",
+              coordinates: [
+                parseFloat(lng as string),
+                parseFloat(lat as string),
+              ],
+            },
+            distanceField: "distanceMeters",
+            maxDistance: maxDistanceMeters,
+            spherical: true,
+          },
+        },
+      ];
+
+      // Exclude "private" users from distance-sorted results entirely
+      const geoMatchFilter: any = {
+        proximityVisibility: { $ne: "private" },
+      };
+      if (currentUser && currentUser.id) {
+        geoMatchFilter._id = {
+          $ne: new mongoose.Types.ObjectId(currentUser.id),
+        };
+      }
+      pipeline.push({ $match: geoMatchFilter });
+
+      // Build match stage for search/activity filters
+      const matchFilter: any = {};
+      if (search && typeof search === "string") {
+        matchFilter.username = { $regex: search, $options: "i" };
+      }
+      const activityFilter = activity || sport;
+      if (activityFilter && typeof activityFilter === "string") {
+        matchFilter.favoriteActivities = activityFilter;
+      }
+      if (Object.keys(matchFilter).length > 0) {
+        pipeline.push({ $match: matchFilter });
+      }
+
+      pipeline.push(
+        { $addFields: { distance: { $divide: ["$distanceMeters", 1609.34] } } },
+        { $project: { distanceMeters: 0, password: 0 } },
+      );
+
+      users = await User.aggregate(pipeline);
+    } else {
+      let filter: any = {};
+
+      if (search && typeof search === "string") {
+        filter.username = { $regex: search, $options: "i" };
+      }
+
+      const activityFilter = activity || sport;
+      if (activityFilter && typeof activityFilter === "string") {
+        filter.favoriteActivities = activityFilter;
+      }
+
+      users = await User.find(filter).select("-password").lean();
     }
-
-    // Filter by favorite activity (supports both ?activity= and legacy ?sport=)
-    const activityFilter = activity || sport;
-    if (activityFilter && typeof activityFilter === "string") {
-      filter.favoriteActivities = activityFilter;
-    }
-
-    const users = await User.find(filter).select("-password");
 
     // Get current user's friend data for status calculation
     let currentUserData: any = null;
@@ -2881,17 +2993,18 @@ app.get("/users", async (req: Request, res: Response) => {
 
     // Get event stats and friend status for each user
     const usersWithStats = await Promise.all(
-      users.map(async (user) => {
+      users.map(async (user: any) => {
+        const userId = user._id.toString();
+
         const eventsCreated = await Event.countDocuments({
-          createdBy: user._id.toString(),
+          createdBy: userId,
         });
         const eventsJoined = await Event.countDocuments({
-          "roster.userId": user._id.toString(),
+          "roster.userId": userId,
         });
 
-        // Calculate friend status
         let friendStatus = "none";
-        if (currentUserData && user._id.toString() !== currentUser.id) {
+        if (currentUserData && userId !== currentUser.id) {
           if (currentUserData.friends?.includes(user._id)) {
             friendStatus = "friends";
           } else if (currentUserData.friendRequestsSent?.includes(user._id)) {
@@ -2901,11 +3014,11 @@ app.get("/users", async (req: Request, res: Response) => {
           ) {
             friendStatus = "pending_received";
           }
-        } else if (currentUser && user._id.toString() === currentUser.id) {
+        } else if (currentUser && userId === currentUser.id) {
           friendStatus = "self";
         }
 
-        return {
+        const result: any = {
           _id: user._id,
           name: user.name,
           email: user.email,
@@ -2916,6 +3029,20 @@ app.get("/users", async (req: Request, res: Response) => {
           eventsJoined,
           friendStatus,
         };
+
+        if (user.distance != null) {
+          const visibility = user.proximityVisibility || "private";
+          if (visibility === "public") {
+            result.distance = user.distance;
+          } else if (
+            visibility === "friends" &&
+            friendStatus === "friends"
+          ) {
+            result.distance = user.distance;
+          }
+        }
+
+        return result;
       }),
     );
 
