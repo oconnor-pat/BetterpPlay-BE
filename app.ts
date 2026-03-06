@@ -2881,34 +2881,38 @@ app.put("/users/me/location", async (req: Request, res: Response) => {
 });
 
 // Update current user's proximity visibility setting
-app.put("/users/me/proximity-visibility", async (req: Request, res: Response) => {
-  try {
-    const currentUser = (req as any).user;
-    if (!currentUser || !currentUser.id) {
-      return res.status(401).json({ message: "Authentication required" });
-    }
+app.put(
+  "/users/me/proximity-visibility",
+  async (req: Request, res: Response) => {
+    try {
+      const currentUser = (req as any).user;
+      if (!currentUser || !currentUser.id) {
+        return res.status(401).json({ message: "Authentication required" });
+      }
 
-    const { proximityVisibility } = req.body;
-    const allowed = ["public", "friends", "private"];
-    if (!allowed.includes(proximityVisibility)) {
-      return res.status(400).json({
-        message: "proximityVisibility must be one of: public, friends, private",
+      const { proximityVisibility } = req.body;
+      const allowed = ["public", "friends", "private"];
+      if (!allowed.includes(proximityVisibility)) {
+        return res.status(400).json({
+          message:
+            "proximityVisibility must be one of: public, friends, private",
+        });
+      }
+
+      await User.findByIdAndUpdate(currentUser.id, { proximityVisibility });
+
+      return res.status(200).json({
+        success: true,
+        message: "Proximity visibility updated successfully",
       });
+    } catch (error) {
+      console.error("Failed to update proximity visibility:", error);
+      return res
+        .status(500)
+        .json({ message: "Failed to update proximity visibility" });
     }
-
-    await User.findByIdAndUpdate(currentUser.id, { proximityVisibility });
-
-    return res.status(200).json({
-      success: true,
-      message: "Proximity visibility updated successfully",
-    });
-  } catch (error) {
-    console.error("Failed to update proximity visibility:", error);
-    return res
-      .status(500)
-      .json({ message: "Failed to update proximity visibility" });
-  }
-});
+  },
+);
 
 // User API to get all users (excluding passwords) with optional search and filtering
 app.get("/users", async (req: Request, res: Response) => {
@@ -2940,16 +2944,33 @@ app.get("/users", async (req: Request, res: Response) => {
         },
       ];
 
-      // Exclude "private" users from distance-sorted results entirely
-      const geoMatchFilter: any = {
-        proximityVisibility: { $ne: "private" },
+      // Enforce proximity visibility:
+      // - Exclude "private" users entirely
+      // - Include "friends" users only if the requester is their friend
+      // - Include "public" users for everyone
+      const currentUserId = currentUser?.id
+        ? new mongoose.Types.ObjectId(currentUser.id)
+        : null;
+
+      const visibilityFilter: any = {
+        $or: [
+          { proximityVisibility: "public" },
+          ...(currentUserId
+            ? [
+                {
+                  proximityVisibility: "friends",
+                  friends: currentUserId,
+                },
+              ]
+            : []),
+        ],
       };
-      if (currentUser && currentUser.id) {
-        geoMatchFilter._id = {
-          $ne: new mongoose.Types.ObjectId(currentUser.id),
-        };
+
+      if (currentUserId) {
+        visibilityFilter._id = { $ne: currentUserId };
       }
-      pipeline.push({ $match: geoMatchFilter });
+
+      pipeline.push({ $match: visibilityFilter });
 
       // Build match stage for search/activity filters
       const matchFilter: any = {};
@@ -3031,15 +3052,18 @@ app.get("/users", async (req: Request, res: Response) => {
         };
 
         if (user.distance != null) {
-          const visibility = user.proximityVisibility || "private";
-          if (visibility === "public") {
-            result.distance = user.distance;
-          } else if (
-            visibility === "friends" &&
-            friendStatus === "friends"
-          ) {
-            result.distance = user.distance;
-          }
+          result.distance = user.distance;
+        }
+
+        // Include lat/lng for client-side distance fallback
+        // Only for users who passed the visibility filter in the proximity pipeline
+        if (
+          user.location &&
+          user.location.coordinates &&
+          user.location.coordinates.length === 2
+        ) {
+          result.longitude = user.location.coordinates[0];
+          result.latitude = user.location.coordinates[1];
         }
 
         return result;
