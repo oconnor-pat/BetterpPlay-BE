@@ -126,6 +126,10 @@ export type NotificationType =
   | "event_update"
   | "event_reminder"
   | "event_invitation"
+  | "event_like"
+  | "event_comment"
+  | "event_join"
+  | "event_leave"
   | "community_note"
   | "general";
 
@@ -180,6 +184,12 @@ export const sendPushNotification = async (
           break;
         case "event_reminder":
           if (!preferences.eventReminders) return false;
+          break;
+        case "event_like":
+        case "event_comment":
+        case "event_join":
+        case "event_leave":
+          if (!preferences.eventActivity) return false;
           break;
         case "community_note":
           if (!preferences.communityNotes) return false;

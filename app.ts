@@ -756,6 +756,21 @@ app.post("/events", async (req: Request, res: Response) => {
       invitedUsers: invitedUsers || [],
     });
 
+    if (invitedUsers && Array.isArray(invitedUsers) && invitedUsers.length > 0) {
+      const currentUser = (req as any).user;
+      notificationService.sendPushNotificationToMany(
+        invitedUsers,
+        "Event Invitation 📩",
+        `You've been invited to "${name}"`,
+        "event_invitation",
+        {
+          eventId: newEvent._id.toString(),
+          eventName: name,
+          invitedBy: (currentUser?.id || createdBy).toString(),
+        },
+      );
+    }
+
     res.status(201).json(newEvent);
   } catch (error) {
     res.status(500).json({ message: "Failed to create event" });
@@ -786,6 +801,16 @@ app.put("/events/:id", async (req: Request, res: Response) => {
       return res.status(404).json({ message: "Event not found" });
     }
 
+    // Snapshot old values for change detection
+    const oldValues: Record<string, any> = {
+      name: event.name,
+      date: event.date,
+      time: event.time,
+      location: event.location,
+      totalSpots: event.totalSpots,
+      eventType: event.eventType,
+    };
+
     event.name = name || event.name;
     event.location = location || event.location;
     event.time = time || event.time;
@@ -811,19 +836,57 @@ app.put("/events/:id", async (req: Request, res: Response) => {
 
     await event.save();
 
-    // Send notifications to all participants in the roster about the event update
+    // Detect which fields changed and build a descriptive notification
+    const newValues: Record<string, any> = {
+      name: event.name,
+      date: event.date,
+      time: event.time,
+      location: event.location,
+      totalSpots: event.totalSpots,
+      eventType: event.eventType,
+    };
+
+    const fieldLabels: Record<string, string> = {
+      name: "name",
+      date: "date",
+      time: "time",
+      location: "location",
+      totalSpots: "total spots",
+      eventType: "activity type",
+    };
+
+    const changedFields: string[] = [];
+    const changeDescriptions: string[] = [];
+    for (const key of Object.keys(oldValues)) {
+      if (String(oldValues[key]) !== String(newValues[key])) {
+        changedFields.push(key);
+        changeDescriptions.push(
+          `${fieldLabels[key]} changed to '${newValues[key]}'`,
+        );
+      }
+    }
+
     if (event.roster && event.roster.length > 0) {
       const participantUserIds = event.roster
         .filter((p: any) => p.userId)
         .map((p: any) => p.userId);
 
       if (participantUserIds.length > 0) {
+        const notifBody =
+          changedFields.length > 0
+            ? `${event.name}: ${changeDescriptions.join(", ")}`
+            : `Event "${event.name}" has been updated`;
+
         notificationService.sendPushNotificationToMany(
           participantUserIds,
           "Event Updated",
-          `Event "${event.name}" has been updated`,
+          notifBody,
           "event_update",
-          { eventId: event._id.toString(), eventName: event.name },
+          {
+            eventId: event._id.toString(),
+            eventName: event.name,
+            changedFields: changedFields.join(","),
+          },
         );
       }
     }
@@ -866,6 +929,16 @@ app.post("/events/:id/roster", async (req: Request, res: Response) => {
       });
     }
 
+    if (event.createdBy && String(event.createdBy) !== String(entry.userId)) {
+      notificationService.sendPushNotification({
+        userId: String(event.createdBy),
+        title: "New Player Joined!",
+        body: `${entry.username} joined "${event.name}"`,
+        type: "event_join",
+        data: { eventId: event._id.toString(), eventName: event.name },
+      });
+    }
+
     return res.status(200).json({ success: true, roster: event.roster });
   } catch (error) {
     console.error("Error adding participant to roster:", error);
@@ -895,6 +968,17 @@ app.delete(
       }
       event.rosterSpotsFilled = event.roster.length;
       await event.save();
+
+      if (event.createdBy) {
+        notificationService.sendPushNotification({
+          userId: String(event.createdBy),
+          title: "Player Left",
+          body: `${username} left "${event.name}"`,
+          type: "event_leave",
+          data: { eventId: event._id.toString(), eventName: event.name },
+        });
+      }
+
       return res.status(200).json({ success: true, roster: event.roster });
     } catch (error) {
       console.error("Error removing participant from roster:", error);
@@ -1095,6 +1179,19 @@ app.post("/events/:eventId/like", async (req: Request, res: Response) => {
       event.likes.splice(likeIndex, 1);
     }
     await event.save();
+
+    if (likeIndex === -1 && event.createdBy && String(event.createdBy) !== String(userId)) {
+      const liker = await User.findById(userId).select("username");
+      if (liker) {
+        notificationService.sendPushNotification({
+          userId: String(event.createdBy),
+          title: "Someone liked your event!",
+          body: `${liker.username} liked "${event.name}"`,
+          type: "event_like",
+          data: { eventId: event._id.toString(), eventName: event.name },
+        });
+      }
+    }
 
     // Fetch usernames for all users who liked
     const likerIds = event.likes.map((id: string) => {
@@ -4142,6 +4239,29 @@ app.post(
             commenterUsername: username,
           },
         });
+      }
+
+      // Notify the event creator if this post is linked to an event
+      if (post.eventId) {
+        const linkedEvent = await Event.findById(post.eventId);
+        if (
+          linkedEvent &&
+          linkedEvent.createdBy &&
+          String(linkedEvent.createdBy) !== userId &&
+          String(linkedEvent.createdBy) !== post.userId
+        ) {
+          notificationService.sendPushNotification({
+            userId: String(linkedEvent.createdBy),
+            title: "New Comment on Your Event",
+            body: `${username} commented on a post about "${linkedEvent.name}"`,
+            type: "event_comment",
+            data: {
+              postId: post._id.toString(),
+              eventId: linkedEvent._id.toString(),
+              eventName: linkedEvent.name,
+            },
+          });
+        }
       }
 
       res.status(201).json({ comments: post.comments });

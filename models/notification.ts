@@ -11,6 +11,10 @@ export interface INotification extends Document {
     | "event_update"
     | "event_reminder"
     | "event_invitation"
+    | "event_like"
+    | "event_comment"
+    | "event_join"
+    | "event_leave"
     | "community_note"
     | "general";
   data?: Record<string, any>;
@@ -44,6 +48,10 @@ const NotificationSchema: Schema = new Schema(
         "event_update",
         "event_reminder",
         "event_invitation",
+        "event_like",
+        "event_comment",
+        "event_join",
+        "event_leave",
         "community_note",
         "general",
       ],
