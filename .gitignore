@@ -7,6 +7,9 @@ node_modules
 # Firebase service account credentials (keep locally, deploy via env vars)
 betterplay-fa87c-firebase-adminsdk-fbsvc-*.json
 
+# Build output
+dist
+
 # Logs
 logs
 *.log
