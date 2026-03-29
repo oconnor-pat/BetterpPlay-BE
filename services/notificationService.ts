@@ -4,6 +4,7 @@ import path from "path";
 import DeviceToken from "../models/deviceToken";
 import NotificationPreferences from "../models/notificationPreferences";
 import Notification from "../models/notification";
+import socketService from "./socketService";
 
 // Initialize Firebase Admin SDK
 // Priority: Service account JSON file (local dev) > Environment variables (Heroku)
@@ -208,6 +209,14 @@ export const sendPushNotification = async (
         read: false,
       });
     }
+
+    // Push real-time update via WebSocket
+    socketService.emitToUser(userId, "notification:new", {
+      title,
+      body,
+      type,
+      data,
+    });
 
     // If Firebase is not initialized, just save to history
     if (!firebaseInitialized) {

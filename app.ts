@@ -1,15 +1,14 @@
 import express, { Application, Request, Response } from "express";
+import { createServer } from "http";
 import mongoose from "mongoose";
 import bcrypt from "bcrypt";
-import User, { IUser } from "./models/user";
+import User from "./models/user";
 import Event from "./models/event";
 import communityNote from "./models/communityNote";
 import Venue from "./models/venue";
 import Booking from "./models/booking";
 import Inquiry from "./models/inquiry";
 import TimeSlot from "./models/timeSlot";
-import DeviceToken from "./models/deviceToken";
-import NotificationPreferences from "./models/notificationPreferences";
 import Notification from "./models/notification";
 import dotenv from "dotenv";
 import jwt from "jsonwebtoken";
@@ -19,8 +18,10 @@ import { body, validationResult } from "express-validator";
 import nodemailer from "nodemailer";
 import notificationService from "./services/notificationService";
 import eventReminderService from "./services/eventReminderService";
+import socketService from "./services/socketService";
 
 const app: Application = express();
+const httpServer = createServer(app);
 
 // Enable CORS for all origins (development)
 app.use(cors());
@@ -424,6 +425,9 @@ app.put("/api/notifications/:id/read", async (req: Request, res: Response) => {
       return res.status(404).json({ message: "Notification not found" });
     }
 
+    const unreadCount = await Notification.countDocuments({ userId: user.id, read: false });
+    socketService.emitToUser(user.id, "notification:badge", { count: unreadCount });
+
     return res.status(200).json({
       success: true,
       notification,
@@ -450,6 +454,8 @@ app.put(
         { userId: user.id, read: false },
         { read: true },
       );
+
+      socketService.emitToUser(user.id, "notification:badge", { count: 0 });
 
       return res.status(200).json({
         success: true,
@@ -557,12 +563,29 @@ app.get("/events", async (req: Request, res: Response) => {
       userNameMap.set(u._id.toString(), u.username || "");
     });
 
-    // Add likedByUsernames to each event
+    // Batch-fetch comment counts for all visible events
+    const eventIds = visibleEvents.map((e: any) => e._id.toString());
+    const commentCounts = await communityNote.aggregate([
+      { $match: { eventId: { $in: eventIds } } },
+      {
+        $project: {
+          eventId: 1,
+          commentCount: { $size: { $ifNull: ["$comments", []] } },
+        },
+      },
+    ]);
+    const commentCountMap = new Map<string, number>();
+    commentCounts.forEach((c: any) => {
+      commentCountMap.set(c.eventId, c.commentCount);
+    });
+
+    // Add likedByUsernames and commentCount to each event
     const eventsWithLikedBy = visibleEvents.map((event: any) => ({
       ...event,
       likedByUsernames: (event.likes || [])
         .map((id: string) => userNameMap.get(String(id)))
         .filter((name: string | undefined): name is string => !!name),
+      commentCount: commentCountMap.get(event._id.toString()) || 0,
     }));
 
     res.status(200).json(eventsWithLikedBy);
@@ -645,6 +668,9 @@ app.post("/events", async (req: Request, res: Response) => {
       jerseyColors,
       privacy,
       invitedUsers,
+      isRecurring,
+      recurrenceFrequency,
+      recurrenceCount,
     } = req.body;
 
     if (
@@ -738,11 +764,10 @@ app.post("/events", async (req: Request, res: Response) => {
     const validPrivacy = ["public", "private", "invite-only"];
     const eventPrivacy = validPrivacy.includes(privacy) ? privacy : "public";
 
-    const newEvent = await Event.create({
+    const baseEventData = {
       name,
       location,
       time,
-      date,
       totalSpots,
       eventType,
       createdBy,
@@ -754,25 +779,77 @@ app.post("/events", async (req: Request, res: Response) => {
       jerseyColors: jerseyColors || [],
       privacy: eventPrivacy,
       invitedUsers: invitedUsers || [],
-    });
+    };
 
-    if (invitedUsers && Array.isArray(invitedUsers) && invitedUsers.length > 0) {
-      const currentUser = (req as any).user;
-      notificationService.sendPushNotificationToMany(
-        invitedUsers,
-        "Event Invitation 📩",
-        `You've been invited to "${name}"`,
-        "event_invitation",
-        {
-          eventId: newEvent._id.toString(),
-          eventName: name,
-          invitedBy: (currentUser?.id || createdBy).toString(),
-        },
-      );
+    if (isRecurring && recurrenceFrequency && recurrenceCount > 1) {
+      const recurrenceGroupId = new mongoose.Types.ObjectId().toString();
+      const count = Math.min(Math.max(parseInt(recurrenceCount), 2), 12);
+      const eventsToCreate = [];
+
+      for (let i = 0; i < count; i++) {
+        const eventDate = new Date(date);
+        if (recurrenceFrequency === "weekly") {
+          eventDate.setDate(eventDate.getDate() + i * 7);
+        } else if (recurrenceFrequency === "biweekly") {
+          eventDate.setDate(eventDate.getDate() + i * 14);
+        } else if (recurrenceFrequency === "monthly") {
+          eventDate.setMonth(eventDate.getMonth() + i);
+        }
+
+        eventsToCreate.push({
+          ...baseEventData,
+          date: eventDate.toISOString().split("T")[0],
+          isRecurring: true,
+          recurrenceGroupId,
+          recurrenceFrequency,
+        });
+      }
+
+      const newEvents = await Event.insertMany(eventsToCreate);
+
+      if (invitedUsers && Array.isArray(invitedUsers) && invitedUsers.length > 0) {
+        const currentUser = (req as any).user;
+        notificationService.sendPushNotificationToMany(
+          invitedUsers,
+          "Event Invitation 📩",
+          `You've been invited to "${name}" (${count} recurring events)`,
+          "event_invitation",
+          {
+            eventId: newEvents[0]._id.toString(),
+            eventName: name,
+            invitedBy: (currentUser?.id || createdBy).toString(),
+          },
+        );
+      }
+
+      socketService.emitToAll("events:refresh", { reason: "created" });
+      res.status(201).json(newEvents);
+    } else {
+      const newEvent = await Event.create({
+        ...baseEventData,
+        date,
+      });
+
+      if (invitedUsers && Array.isArray(invitedUsers) && invitedUsers.length > 0) {
+        const currentUser = (req as any).user;
+        notificationService.sendPushNotificationToMany(
+          invitedUsers,
+          "Event Invitation 📩",
+          `You've been invited to "${name}"`,
+          "event_invitation",
+          {
+            eventId: newEvent._id.toString(),
+            eventName: name,
+            invitedBy: (currentUser?.id || createdBy).toString(),
+          },
+        );
+      }
+
+      socketService.emitToAll("events:refresh", { reason: "created" });
+      res.status(201).json(newEvent);
     }
-
-    res.status(201).json(newEvent);
   } catch (error) {
+    console.error("Error creating event:", error);
     res.status(500).json({ message: "Failed to create event" });
   }
 });
@@ -830,11 +907,33 @@ app.put("/events/:id", async (req: Request, res: Response) => {
         event.privacy = privacy;
       }
     }
+    const previousInvitedUsers = [...(event.invitedUsers || [])];
     if (invitedUsers !== undefined) {
       event.invitedUsers = invitedUsers;
     }
 
     await event.save();
+
+    // Notify newly invited users
+    if (invitedUsers !== undefined) {
+      const newlyInvited = invitedUsers.filter(
+        (id: string) => !previousInvitedUsers.includes(id),
+      );
+      if (newlyInvited.length > 0) {
+        const currentUser = (req as any).user;
+        notificationService.sendPushNotificationToMany(
+          newlyInvited,
+          "Event Invitation 📩",
+          `You've been invited to "${event.name}"`,
+          "event_invitation",
+          {
+            eventId: event._id.toString(),
+            eventName: event.name,
+            invitedBy: currentUser?.id || String(event.createdBy),
+          },
+        );
+      }
+    }
 
     // Detect which fields changed and build a descriptive notification
     const newValues: Record<string, any> = {
@@ -891,6 +990,9 @@ app.put("/events/:id", async (req: Request, res: Response) => {
       }
     }
 
+    socketService.emitToAll("events:refresh", { reason: "updated", eventId: event._id.toString() });
+    socketService.emitToEvent(event._id.toString(), "event:updated", { event });
+
     res.status(200).json(event);
   } catch (error) {
     res.status(500).json({ message: "Failed to update event" });
@@ -939,6 +1041,13 @@ app.post("/events/:id/roster", async (req: Request, res: Response) => {
       });
     }
 
+    socketService.emitToEvent(eventId, "roster:updated", {
+      eventId,
+      roster: event.roster,
+      rosterSpotsFilled: event.rosterSpotsFilled,
+    });
+    socketService.emitToAll("events:refresh", { reason: "roster_join", eventId });
+
     return res.status(200).json({ success: true, roster: event.roster });
   } catch (error) {
     console.error("Error adding participant to roster:", error);
@@ -978,6 +1087,13 @@ app.delete(
           data: { eventId: event._id.toString(), eventName: event.name },
         });
       }
+
+      socketService.emitToEvent(eventId, "roster:updated", {
+        eventId,
+        roster: event.roster,
+        rosterSpotsFilled: event.rosterSpotsFilled,
+      });
+      socketService.emitToAll("events:refresh", { reason: "roster_leave", eventId });
 
       return res.status(200).json({ success: true, roster: event.roster });
     } catch (error) {
@@ -1020,6 +1136,44 @@ app.patch("/events/:id/roster", async (req: Request, res: Response) => {
     res.status(500).json({ message: "Failed to update roster" });
   }
 });
+
+// Delete all events in a recurring series (must be before /events/:id to avoid route conflict)
+app.delete(
+  "/events/series/:recurrenceGroupId",
+  async (req: Request, res: Response) => {
+    try {
+      const currentUser = (req as any).user;
+      if (!currentUser || !currentUser.id) {
+        return res.status(401).json({ message: "Authentication required" });
+      }
+
+      const { recurrenceGroupId } = req.params;
+
+      const sample = await Event.findOne({ recurrenceGroupId });
+      if (!sample) {
+        return res
+          .status(404)
+          .json({ message: "No events found for this series" });
+      }
+
+      if (String(sample.createdBy) !== currentUser.id) {
+        return res
+          .status(403)
+          .json({ message: "Only the event creator can delete the series" });
+      }
+
+      const result = await Event.deleteMany({ recurrenceGroupId });
+
+      res.status(200).json({
+        success: true,
+        deletedCount: result.deletedCount,
+      });
+    } catch (error) {
+      console.error("Failed to delete recurring series:", error);
+      res.status(500).json({ message: "Failed to delete recurring series" });
+    }
+  },
+);
 
 // Delete an event
 app.delete("/events/:id", async (req: Request, res: Response) => {
@@ -1211,7 +1365,13 @@ app.post("/events/:eventId/like", async (req: Request, res: Response) => {
       })
       .filter((name: string | undefined): name is string => !!name);
 
-    res.status(200).json({ likes: event.likes, likedByUsernames });
+    const likePayload = { likes: event.likes, likedByUsernames };
+    socketService.emitToAll("event:liked", {
+      eventId: req.params.eventId,
+      ...likePayload,
+    });
+
+    res.status(200).json(likePayload);
   } catch (error) {
     console.error("Error toggling event like:", error);
     res.status(500).json({ message: "Failed to toggle like on event." });
@@ -4145,19 +4305,31 @@ app.post("/community-notes", async (req: Request, res: Response) => {
       eventType: eventType || null,
     });
 
-    // If post is linked to an event, notify event attendees
+    // If post is linked to an event, notify event creator and roster participants
     if (eventId) {
       const event = await Event.findById(eventId);
-      if (event && event.roster && event.roster.length > 0) {
-        const attendeeUserIds = event.roster
-          .filter((p: any) => p.userId && p.userId !== userId) // Exclude the poster
-          .map((p: any) => p.userId);
+      if (event) {
+        const notifyUserIds = new Set<string>();
 
-        if (attendeeUserIds.length > 0) {
+        // Always notify the event creator (unless they're the poster)
+        if (event.createdBy && String(event.createdBy) !== userId) {
+          notifyUserIds.add(String(event.createdBy));
+        }
+
+        // Notify roster participants
+        if (event.roster && event.roster.length > 0) {
+          event.roster.forEach((p: any) => {
+            if (p.userId && p.userId !== userId) {
+              notifyUserIds.add(p.userId);
+            }
+          });
+        }
+
+        if (notifyUserIds.size > 0) {
           notificationService.sendPushNotificationToMany(
-            attendeeUserIds,
-            "New Community Post 📝",
-            `${username} posted about "${eventName}"`,
+            Array.from(notifyUserIds),
+            "New Discussion Post 💬",
+            `${username} posted on "${eventName}"`,
             "community_note",
             {
               postId: newPost._id.toString(),
@@ -4236,6 +4408,8 @@ app.post(
           type: "community_note",
           data: {
             postId: post._id.toString(),
+            eventId: post.eventId || "",
+            eventName: post.eventName || "",
             commenterUsername: username,
           },
         });
@@ -4264,6 +4438,13 @@ app.post(
         }
       }
 
+      socketService.emitToEvent(post.eventId || "", "comments:updated", {
+        postId: post._id.toString(),
+        eventId: post.eventId || "",
+        comments: post.comments,
+      });
+      socketService.emitToAll("events:refresh", { reason: "comment_added" });
+
       res.status(201).json({ comments: post.comments });
     } catch (error) {
       res.status(500).json({ message: "Failed to add comment." });
@@ -4284,6 +4465,11 @@ app.put(
         return res.status(404).json({ message: "Comment not found." });
       comment.text = text || comment.text;
       await post.save();
+      socketService.emitToEvent(post.eventId || "", "comments:updated", {
+        postId: post._id.toString(),
+        eventId: post.eventId || "",
+        comments: post.comments,
+      });
       res.status(200).json({ text: comment.text });
     } catch (error) {
       res.status(500).json({ message: "Failed to edit comment." });
@@ -4303,6 +4489,12 @@ app.delete(
         return res.status(404).json({ message: "Comment not found." });
       post.comments.pull(req.params.commentId);
       await post.save();
+      socketService.emitToEvent(post.eventId || "", "comments:updated", {
+        postId: post._id.toString(),
+        eventId: post.eventId || "",
+        comments: post.comments,
+      });
+      socketService.emitToAll("events:refresh", { reason: "comment_deleted" });
       res.status(200).json({ comments: post.comments });
     } catch (error) {
       res.status(500).json({ message: "Failed to delete comment." });
@@ -4336,6 +4528,27 @@ app.post(
         profilePicUrl,
       });
       await post.save();
+
+      // Notify the comment author about the new reply
+      if (comment.userId && comment.userId !== userId) {
+        notificationService.sendPushNotification({
+          userId: comment.userId,
+          title: "New Reply 💬",
+          body: `${username} replied to your comment`,
+          type: "community_note",
+          data: {
+            postId: post._id.toString(),
+            eventId: post.eventId || "",
+            eventName: post.eventName || "",
+          },
+        });
+      }
+
+      socketService.emitToEvent(post.eventId || "", "comments:updated", {
+        postId: post._id.toString(),
+        eventId: post.eventId || "",
+        comments: post.comments,
+      });
       res.status(201).json({ replies: comment.replies });
     } catch (error) {
       res.status(500).json({ message: "Failed to add reply." });
@@ -4358,6 +4571,11 @@ app.put(
       if (!reply) return res.status(404).json({ message: "Reply not found." });
       reply.text = text || reply.text;
       await post.save();
+      socketService.emitToEvent(post.eventId || "", "comments:updated", {
+        postId: post._id.toString(),
+        eventId: post.eventId || "",
+        comments: post.comments,
+      });
       res.status(200).json({ text: reply.text });
     } catch (error) {
       res.status(500).json({ message: "Failed to edit reply." });
@@ -4379,6 +4597,11 @@ app.delete(
       if (!reply) return res.status(404).json({ message: "Reply not found." });
       comment.replies.pull(req.params.replyId);
       await post.save();
+      socketService.emitToEvent(post.eventId || "", "comments:updated", {
+        postId: post._id.toString(),
+        eventId: post.eventId || "",
+        comments: post.comments,
+      });
       res.status(200).json({ replies: comment.replies });
     } catch (error) {
       res.status(500).json({ message: "Failed to delete reply." });
@@ -4406,6 +4629,24 @@ app.post(
       }
       await post.save();
 
+      // Notify post author on new like
+      if (likeIndex === -1 && post.userId && post.userId !== userId) {
+        const liker = await User.findById(userId).select("username");
+        if (liker) {
+          notificationService.sendPushNotification({
+            userId: post.userId,
+            title: "Your post was liked ❤️",
+            body: `${liker.username} liked your discussion post`,
+            type: "community_note",
+            data: {
+              postId: post._id.toString(),
+              eventId: post.eventId || "",
+              eventName: post.eventName || "",
+            },
+          });
+        }
+      }
+
       // Fetch usernames for all users who liked
       const likerIds = post.likes.map((id: string) => {
         try {
@@ -4423,6 +4664,14 @@ app.post(
           return user?.username;
         })
         .filter((name: string | undefined): name is string => !!name);
+
+      socketService.emitToEvent(post.eventId || "", "comments:updated", {
+        postId: post._id.toString(),
+        eventId: post.eventId || "",
+        comments: post.comments,
+        likes: post.likes,
+        likedByUsernames,
+      });
 
       res.status(200).json({ likes: post.likes, likedByUsernames });
     } catch (error) {
@@ -4454,6 +4703,24 @@ app.post(
       }
       await post.save();
 
+      // Notify comment author on new like
+      if (likeIndex === -1 && comment.userId && comment.userId !== userId) {
+        const liker = await User.findById(userId).select("username");
+        if (liker) {
+          notificationService.sendPushNotification({
+            userId: comment.userId,
+            title: "Your comment was liked ❤️",
+            body: `${liker.username} liked your comment`,
+            type: "community_note",
+            data: {
+              postId: post._id.toString(),
+              eventId: post.eventId || "",
+              eventName: post.eventName || "",
+            },
+          });
+        }
+      }
+
       // Fetch usernames for all users who liked
       const likerIds = comment.likes.map((id: string) => {
         try {
@@ -4471,6 +4738,12 @@ app.post(
           return user?.username;
         })
         .filter((name: string | undefined): name is string => !!name);
+
+      socketService.emitToEvent(post.eventId || "", "comments:updated", {
+        postId: post._id.toString(),
+        eventId: post.eventId || "",
+        comments: post.comments,
+      });
 
       res.status(200).json({ likes: comment.likes, likedByUsernames });
     } catch (error) {
@@ -4504,6 +4777,24 @@ app.post(
       }
       await post.save();
 
+      // Notify reply author on new like
+      if (likeIndex === -1 && reply.userId && reply.userId !== userId) {
+        const liker = await User.findById(userId).select("username");
+        if (liker) {
+          notificationService.sendPushNotification({
+            userId: reply.userId,
+            title: "Your reply was liked ❤️",
+            body: `${liker.username} liked your reply`,
+            type: "community_note",
+            data: {
+              postId: post._id.toString(),
+              eventId: post.eventId || "",
+              eventName: post.eventName || "",
+            },
+          });
+        }
+      }
+
       // Fetch usernames for all users who liked
       const likerIds = reply.likes.map((id: string) => {
         try {
@@ -4522,6 +4813,12 @@ app.post(
         })
         .filter((name: string | undefined): name is string => !!name);
 
+      socketService.emitToEvent(post.eventId || "", "comments:updated", {
+        postId: post._id.toString(),
+        eventId: post.eventId || "",
+        comments: post.comments,
+      });
+
       res.status(200).json({ likes: reply.likes, likedByUsernames });
     } catch (error) {
       res.status(500).json({ message: "Failed to toggle like on reply." });
@@ -4534,7 +4831,9 @@ app.post(
 // Declare The PORT
 const PORT = process.env.PORT || 8001;
 
-app.listen(PORT, async () => {
+socketService.initialize(httpServer);
+
+httpServer.listen(PORT, async () => {
   console.log(`🗄️ Server Fire on http://localhost:${PORT}`);
 
   // Connect to Database

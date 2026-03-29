@@ -40,6 +40,9 @@ export interface IEvent extends Document {
   likes: string[]; // Array of userIds who liked
   privacy: "public" | "private" | "invite-only"; // Event visibility
   invitedUsers: string[]; // Array of userIds invited (for invite-only events)
+  isRecurring?: boolean;
+  recurrenceGroupId?: string;
+  recurrenceFrequency?: "weekly" | "biweekly" | "monthly";
 }
 
 const EventSchema: Schema = new Schema(
@@ -64,6 +67,13 @@ const EventSchema: Schema = new Schema(
       default: "public",
     }, // Event visibility
     invitedUsers: { type: [String], default: [] }, // Array of userIds invited
+    isRecurring: { type: Boolean, default: false },
+    recurrenceGroupId: { type: String, default: null },
+    recurrenceFrequency: {
+      type: String,
+      enum: ["weekly", "biweekly", "monthly", null],
+      default: null,
+    },
   },
   { timestamps: true },
 );
