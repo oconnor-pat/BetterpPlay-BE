@@ -7,6 +7,11 @@ export interface ITimeSlot extends Document {
   startTime: string; // Format: HH:MM (24hr)
   endTime: string; // Format: HH:MM (24hr)
   price: number;
+  name?: string;
+  description?: string;
+  category?: string;
+  ageRestriction?: string;
+  maxCapacity?: number;
   isCustom: boolean; // true = admin-created, false = auto-generated
   isActive: boolean; // Can be disabled without deleting
   createdBy: mongoose.Types.ObjectId; // Admin who created it
@@ -22,6 +27,11 @@ const TimeSlotSchema: Schema = new Schema(
     startTime: { type: String, required: true }, // HH:MM
     endTime: { type: String, required: true }, // HH:MM
     price: { type: Number, required: true, default: 150 },
+    name: { type: String, required: false },
+    description: { type: String, required: false },
+    category: { type: String, required: false },
+    ageRestriction: { type: String, required: false },
+    maxCapacity: { type: Number, required: false },
     isCustom: { type: Boolean, default: true },
     isActive: { type: Boolean, default: true },
     createdBy: { type: Schema.Types.ObjectId, ref: "Users", required: true },
