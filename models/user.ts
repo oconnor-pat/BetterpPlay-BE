@@ -37,7 +37,7 @@ const UserSchema: Schema = new Schema(
       { type: Schema.Types.ObjectId, ref: "Users", default: [] },
     ],
     location: {
-      type: { type: String, enum: ["Point"], default: "Point" },
+      type: { type: String, enum: ["Point"] },
       coordinates: { type: [Number] },
     },
     proximityVisibility: {
