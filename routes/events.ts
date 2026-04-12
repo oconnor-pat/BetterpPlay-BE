@@ -495,8 +495,60 @@ router.post("/:id/roster", async (req: Request, res: Response) => {
     if (event.roster.some((p: any) => p.username === entry.username)) {
       return res.status(409).json({ message: "Participant already in roster" });
     }
+
+    // Clear expired reservation if present
+    if (
+      event.spotReservation &&
+      new Date(event.spotReservation.expiresAt) <= new Date()
+    ) {
+      event.spotReservation = null;
+    }
+
+    if (event.roster.length >= event.totalSpots) {
+      // If there's a valid reservation for this user, allow them through
+      if (
+        event.spotReservation &&
+        entry.userId &&
+        event.spotReservation.userId === entry.userId
+      ) {
+        // Reserved user is claiming their spot — handled below
+      } else {
+        return res.status(400).json({ message: "Event is full", full: true });
+      }
+    }
+
+    // If spot is reserved for someone else and roster is at totalSpots - 1,
+    // block non-reserved users from taking the last spot
+    if (
+      event.spotReservation &&
+      entry.userId !== event.spotReservation.userId &&
+      event.roster.length >= event.totalSpots - 1
+    ) {
+      return res.status(400).json({
+        message: "The last spot is temporarily reserved for another player",
+        reserved: true,
+      });
+    }
+
     event.roster.push(entry);
     event.rosterSpotsFilled = event.roster.length;
+
+    // Clear reservation if this user was the reserved one
+    if (
+      event.spotReservation &&
+      entry.userId &&
+      event.spotReservation.userId === entry.userId
+    ) {
+      event.spotReservation = null;
+    }
+
+    // Remove from waitlist if they were on it
+    if (entry.userId) {
+      event.waitlist = event.waitlist.filter(
+        (w: any) => w.userId !== entry.userId,
+      );
+    }
+
     await event.save();
 
     if (entry.userId) {
@@ -523,6 +575,7 @@ router.post("/:id/roster", async (req: Request, res: Response) => {
       eventId,
       roster: event.roster,
       rosterSpotsFilled: event.rosterSpotsFilled,
+      spotReservation: event.spotReservation,
     });
     socketService.emitToAll("events:refresh", { reason: "roster_join", eventId });
 
@@ -535,6 +588,9 @@ router.post("/:id/roster", async (req: Request, res: Response) => {
   }
 });
 
+// How long a waitlisted user has to claim their spot (in minutes)
+const SPOT_RESERVATION_MINUTES = 15;
+
 router.delete(
   "/:id/roster/:username",
   async (req: Request, res: Response) => {
@@ -545,6 +601,7 @@ router.delete(
       if (!event) {
         return res.status(404).json({ message: "Event not found" });
       }
+      const wasFull = event.roster.length >= event.totalSpots;
       const initialLength = event.roster.length;
       event.roster = event.roster.filter((p: any) => p.username !== username);
       if (event.roster.length === initialLength) {
@@ -553,6 +610,85 @@ router.delete(
           .json({ message: "Participant not found in roster" });
       }
       event.rosterSpotsFilled = event.roster.length;
+
+      // Reserve the spot for the first waitlisted user
+      if (wasFull && event.waitlist && event.waitlist.length > 0) {
+        const nextInLine = event.waitlist.shift()!;
+        const expiresAt = new Date(
+          Date.now() + SPOT_RESERVATION_MINUTES * 60 * 1000,
+        );
+        event.spotReservation = {
+          userId: nextInLine.userId,
+          username: nextInLine.username,
+          profilePicUrl: nextInLine.profilePicUrl,
+          expiresAt,
+        };
+
+        notificationService.sendPushNotification({
+          userId: nextInLine.userId,
+          title: "A spot opened up! 🎉",
+          body: `A spot in "${event.name}" is reserved for you for ${SPOT_RESERVATION_MINUTES} minutes. Tap to claim it!`,
+          type: "event_spot_available",
+          data: { eventId: event._id.toString(), eventName: event.name },
+        });
+
+        // Schedule expiry check
+        setTimeout(async () => {
+          try {
+            const freshEvent = await Event.findById(eventId);
+            if (
+              freshEvent?.spotReservation &&
+              freshEvent.spotReservation.userId === nextInLine.userId &&
+              new Date(freshEvent.spotReservation.expiresAt) <= new Date()
+            ) {
+              // Reservation expired — clear it and promote the next person
+              freshEvent.spotReservation = null;
+
+              // If there's another person waiting, reserve for them
+              if (freshEvent.waitlist && freshEvent.waitlist.length > 0) {
+                const nextNext = freshEvent.waitlist.shift()!;
+                const newExpiry = new Date(
+                  Date.now() + SPOT_RESERVATION_MINUTES * 60 * 1000,
+                );
+                freshEvent.spotReservation = {
+                  userId: nextNext.userId,
+                  username: nextNext.username,
+                  profilePicUrl: nextNext.profilePicUrl,
+                  expiresAt: newExpiry,
+                };
+
+                notificationService.sendPushNotification({
+                  userId: nextNext.userId,
+                  title: "A spot opened up! 🎉",
+                  body: `A spot in "${freshEvent.name}" is reserved for you for ${SPOT_RESERVATION_MINUTES} minutes. Tap to claim it!`,
+                  type: "event_spot_available",
+                  data: {
+                    eventId: freshEvent._id.toString(),
+                    eventName: freshEvent.name,
+                  },
+                });
+              }
+
+              await freshEvent.save();
+
+              socketService.emitToEvent(eventId, "roster:updated", {
+                eventId,
+                roster: freshEvent.roster,
+                rosterSpotsFilled: freshEvent.rosterSpotsFilled,
+                waitlist: freshEvent.waitlist,
+                spotReservation: freshEvent.spotReservation,
+              });
+              socketService.emitToAll("events:refresh", {
+                reason: "reservation_expired",
+                eventId,
+              });
+            }
+          } catch (err) {
+            console.error("Error processing reservation expiry:", err);
+          }
+        }, SPOT_RESERVATION_MINUTES * 60 * 1000 + 5000);
+      }
+
       await event.save();
 
       if (event.createdBy) {
@@ -569,6 +705,8 @@ router.delete(
         eventId,
         roster: event.roster,
         rosterSpotsFilled: event.rosterSpotsFilled,
+        waitlist: event.waitlist,
+        spotReservation: event.spotReservation,
       });
       socketService.emitToAll("events:refresh", { reason: "roster_leave", eventId });
 
@@ -837,6 +975,106 @@ router.post("/:eventId/like", async (req: Request, res: Response) => {
   } catch (error) {
     console.error("Error toggling event like:", error);
     res.status(500).json({ message: "Failed to toggle like on event." });
+  }
+});
+
+// Join waitlist
+router.post("/:id/waitlist", async (req: Request, res: Response) => {
+  try {
+    const event = await Event.findById(req.params.id);
+    if (!event) {
+      return res.status(404).json({ message: "Event not found" });
+    }
+
+    const currentUser = (req as any).user;
+    if (!currentUser || !currentUser.id) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+
+    const user = await User.findById(currentUser.id).select("username profilePicUrl");
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    if (event.roster.some((p: any) => p.userId === currentUser.id)) {
+      return res.status(400).json({ message: "Already on the roster" });
+    }
+
+    if (event.waitlist.some((w: any) => w.userId === currentUser.id)) {
+      return res.status(409).json({ message: "Already on the waitlist" });
+    }
+
+    event.waitlist.push({
+      userId: currentUser.id,
+      username: user.username,
+      profilePicUrl: (user as any).profilePicUrl || undefined,
+      joinedAt: new Date(),
+    });
+    await event.save();
+
+    const position = event.waitlist.length;
+
+    if (event.createdBy && String(event.createdBy) !== currentUser.id) {
+      notificationService.sendPushNotification({
+        userId: String(event.createdBy),
+        title: "New Waitlist Entry",
+        body: `${user.username} joined the waitlist for "${event.name}"`,
+        type: "event_waitlist_join",
+        data: { eventId: event._id.toString(), eventName: event.name },
+      });
+    }
+
+    socketService.emitToEvent(req.params.id, "waitlist:updated", {
+      eventId: req.params.id,
+      waitlist: event.waitlist,
+    });
+    socketService.emitToAll("events:refresh", { reason: "waitlist_join", eventId: req.params.id });
+
+    return res.status(200).json({
+      success: true,
+      position,
+      waitlist: event.waitlist,
+    });
+  } catch (error) {
+    console.error("Error joining waitlist:", error);
+    return res.status(500).json({ message: "Failed to join waitlist" });
+  }
+});
+
+// Leave waitlist
+router.delete("/:id/waitlist", async (req: Request, res: Response) => {
+  try {
+    const event = await Event.findById(req.params.id);
+    if (!event) {
+      return res.status(404).json({ message: "Event not found" });
+    }
+
+    const currentUser = (req as any).user;
+    if (!currentUser || !currentUser.id) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+
+    const initialLength = event.waitlist.length;
+    event.waitlist = event.waitlist.filter(
+      (w: any) => w.userId !== currentUser.id,
+    );
+
+    if (event.waitlist.length === initialLength) {
+      return res.status(404).json({ message: "Not on the waitlist" });
+    }
+
+    await event.save();
+
+    socketService.emitToEvent(req.params.id, "waitlist:updated", {
+      eventId: req.params.id,
+      waitlist: event.waitlist,
+    });
+    socketService.emitToAll("events:refresh", { reason: "waitlist_leave", eventId: req.params.id });
+
+    return res.status(200).json({ success: true, waitlist: event.waitlist });
+  } catch (error) {
+    console.error("Error leaving waitlist:", error);
+    return res.status(500).json({ message: "Failed to leave waitlist" });
   }
 });
 

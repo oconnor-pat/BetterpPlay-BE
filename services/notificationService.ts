@@ -131,6 +131,8 @@ export type NotificationType =
   | "event_comment"
   | "event_join"
   | "event_leave"
+  | "event_spot_available"
+  | "event_waitlist_join"
   | "community_note"
   | "general";
 

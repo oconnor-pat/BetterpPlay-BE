@@ -23,6 +23,40 @@ const ParticipantSchema: Schema = new Schema(
   { _id: false },
 );
 
+export interface IWaitlistEntry {
+  userId: string;
+  username: string;
+  profilePicUrl?: string;
+  joinedAt: Date;
+}
+
+const WaitlistEntrySchema: Schema = new Schema(
+  {
+    userId: { type: String, required: true },
+    username: { type: String, required: true },
+    profilePicUrl: { type: String, required: false },
+    joinedAt: { type: Date, default: Date.now },
+  },
+  { _id: false },
+);
+
+export interface ISpotReservation {
+  userId: string;
+  username: string;
+  profilePicUrl?: string;
+  expiresAt: Date;
+}
+
+const SpotReservationSchema: Schema = new Schema(
+  {
+    userId: { type: String, required: true },
+    username: { type: String, required: true },
+    profilePicUrl: { type: String, required: false },
+    expiresAt: { type: Date, required: true },
+  },
+  { _id: false },
+);
+
 export interface IEvent extends Document {
   name: string;
   location: string;
@@ -32,14 +66,16 @@ export interface IEvent extends Document {
   rosterSpotsFilled: number;
   eventType: string;
   createdBy: string;
-  createdByUsername?: string; // <-- Added field
+  createdByUsername?: string;
   roster: IParticipant[];
+  waitlist: IWaitlistEntry[];
+  spotReservation?: ISpotReservation | null;
   latitude?: number;
   longitude?: number;
-  jerseyColors?: string[]; // Team colors (for sports events)
-  likes: string[]; // Array of userIds who liked
-  privacy: "public" | "private" | "invite-only"; // Event visibility
-  invitedUsers: string[]; // Array of userIds invited (for invite-only events)
+  jerseyColors?: string[];
+  likes: string[];
+  privacy: "public" | "private" | "invite-only";
+  invitedUsers: string[];
   isRecurring?: boolean;
   recurrenceGroupId?: string;
   recurrenceFrequency?: "weekly" | "biweekly" | "monthly";
@@ -57,6 +93,8 @@ const EventSchema: Schema = new Schema(
     createdBy: { type: String, required: true },
     createdByUsername: { type: String }, // <-- Added field
     roster: { type: [ParticipantSchema], default: [] },
+    waitlist: { type: [WaitlistEntrySchema], default: [] },
+    spotReservation: { type: SpotReservationSchema, default: null },
     latitude: { type: Number, required: false },
     longitude: { type: Number, required: false },
     jerseyColors: { type: [String], default: [] }, // Team colors (for sports events)

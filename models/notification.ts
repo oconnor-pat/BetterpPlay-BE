@@ -15,6 +15,8 @@ export interface INotification extends Document {
     | "event_comment"
     | "event_join"
     | "event_leave"
+    | "event_spot_available"
+    | "event_waitlist_join"
     | "community_note"
     | "general";
   data?: Record<string, any>;
@@ -52,6 +54,8 @@ const NotificationSchema: Schema = new Schema(
         "event_comment",
         "event_join",
         "event_leave",
+        "event_spot_available",
+        "event_waitlist_join",
         "community_note",
         "general",
       ],
