@@ -1,0 +1,6 @@
+{
+  "watch": ["app.ts", "routes/", "services/", "models/", "middleware/"],
+  "ext": "ts,json",
+  "ignore": ["node_modules/", "dist/", "*.test.ts"],
+  "exec": "node -r ts-node/register app.ts"
+}

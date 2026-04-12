@@ -1,7 +1,6 @@
 import { Router, Request, Response } from "express";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
-import AWS from "aws-sdk";
 import { body, validationResult } from "express-validator";
 import nodemailer from "nodemailer";
 import User from "../models/user";
@@ -14,11 +13,41 @@ function getJwtSecret(): string {
   return process.env.JWT_SECRET!;
 }
 
-function getS3(): AWS.S3 {
-  return new AWS.S3({
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-    region: process.env.AWS_REGION,
+function deleteS3Object(bucket: string, key: string): Promise<void> {
+  const https = require("https");
+  const crypto = require("crypto");
+
+  const region = process.env.AWS_REGION || "us-east-1";
+  const accessKey = process.env.AWS_ACCESS_KEY_ID || "";
+  const secretKey = process.env.AWS_SECRET_ACCESS_KEY || "";
+  const host = `${bucket}.s3.${region}.amazonaws.com`;
+  const now = new Date();
+  const dateStamp = now.toISOString().replace(/[-:]/g, "").split(".")[0] + "Z";
+  const shortDate = dateStamp.slice(0, 8);
+
+  const canonicalUri = "/" + key;
+  const canonicalQuerystring = "";
+  const payloadHash = crypto.createHash("sha256").update("").digest("hex");
+  const canonicalHeaders = `host:${host}\nx-amz-content-sha256:${payloadHash}\nx-amz-date:${dateStamp}\n`;
+  const signedHeaders = "host;x-amz-content-sha256;x-amz-date";
+  const canonicalRequest = `DELETE\n${canonicalUri}\n${canonicalQuerystring}\n${canonicalHeaders}\n${signedHeaders}\n${payloadHash}`;
+
+  const credentialScope = `${shortDate}/${region}/s3/aws4_request`;
+  const stringToSign = `AWS4-HMAC-SHA256\n${dateStamp}\n${credentialScope}\n${crypto.createHash("sha256").update(canonicalRequest).digest("hex")}`;
+
+  const hmac = (k: any, d: string) => crypto.createHmac("sha256", k).update(d).digest();
+  const signingKey = hmac(hmac(hmac(hmac("AWS4" + secretKey, shortDate), region), "s3"), "aws4_request");
+  const signature = crypto.createHmac("sha256", signingKey).update(stringToSign).digest("hex");
+
+  const authorization = `AWS4-HMAC-SHA256 Credential=${accessKey}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      { hostname: host, path: canonicalUri, method: "DELETE", headers: { "x-amz-date": dateStamp, "x-amz-content-sha256": payloadHash, Authorization: authorization } },
+      (res: any) => { res.resume(); res.statusCode < 300 ? resolve() : reject(new Error(`S3 delete failed: ${res.statusCode}`)); },
+    );
+    req.on("error", reject);
+    req.end();
   });
 }
 
@@ -566,12 +595,7 @@ router.delete("/auth/delete-account", async (req: Request, res: Response) => {
       try {
         const url = new URL(user.profilePicUrl);
         const key = url.pathname.substring(1);
-        await getS3()
-          .deleteObject({
-            Bucket: process.env.AWS_S3_BUCKET_NAME || "",
-            Key: key,
-          })
-          .promise();
+        await deleteS3Object(process.env.AWS_S3_BUCKET_NAME || "", key);
       } catch (s3Error) {
         console.error("Error deleting profile picture from S3:", s3Error);
       }
