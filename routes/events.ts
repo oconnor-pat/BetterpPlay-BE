@@ -13,7 +13,43 @@ router.get("/", async (req: Request, res: Response) => {
     const currentUser = (req as any).user;
     const currentUserId = currentUser?.id;
 
-    const allEvents = await Event.find().lean();
+    // Optional filter — used by the Venues tab to populate a venue's
+    // "Happening here" feed. Matches either:
+    //   1. events explicitly linked via venueId (planned through the
+    //      Venues-tab bridge), OR
+    //   2. events whose lat/lng falls within a tight box around the venue's
+    //      coordinates (catches events created via the regular `+` FAB
+    //      where the user picked the same place via Google Places
+    //      autocomplete — those events end up with identical coordinates
+    //      to the venue but no venueId link).
+    // Privacy rules below still apply, so private/invite-only events are
+    // hidden from outsiders.
+    const {
+      venueId,
+      lat: latRaw,
+      lng: lngRaw,
+    } = req.query as { venueId?: string; lat?: string; lng?: string };
+
+    const lat = latRaw ? parseFloat(latRaw) : NaN;
+    const lng = lngRaw ? parseFloat(lngRaw) : NaN;
+    // ~55m at 40°N. Tight enough to avoid bleeding into adjacent businesses,
+    // generous enough to absorb GPS jitter and slight pin offsets.
+    const COORD_TOLERANCE = 0.0005;
+
+    const venueClauses: Record<string, unknown>[] = [];
+    if (venueId && typeof venueId === "string") {
+      venueClauses.push({ venueId });
+    }
+    if (Number.isFinite(lat) && Number.isFinite(lng)) {
+      venueClauses.push({
+        latitude: { $gte: lat - COORD_TOLERANCE, $lte: lat + COORD_TOLERANCE },
+        longitude: { $gte: lng - COORD_TOLERANCE, $lte: lng + COORD_TOLERANCE },
+      });
+    }
+    const baseQuery: Record<string, unknown> =
+      venueClauses.length > 0 ? { $or: venueClauses } : {};
+
+    const allEvents = await Event.find(baseQuery).lean();
 
     const visibleEvents = allEvents.filter((event: any) => {
       const privacy = event.privacy || "public";
@@ -165,6 +201,9 @@ router.post("/", async (req: Request, res: Response) => {
       isRecurring,
       recurrenceFrequency,
       recurrenceCount,
+      venueId,
+      venueName,
+      sourceUrl,
     } = req.body;
 
     if (
@@ -265,6 +304,11 @@ router.post("/", async (req: Request, res: Response) => {
       jerseyColors: jerseyColors || [],
       privacy: eventPrivacy,
       invitedUsers: invitedUsers || [],
+      // Optional venue listing reference (set when a user planned this event
+      // from the Venues tab via "Plan event from this page").
+      venueId: venueId || undefined,
+      venueName: venueName || undefined,
+      sourceUrl: sourceUrl || undefined,
     };
 
     if (isRecurring && recurrenceFrequency && recurrenceCount > 1) {

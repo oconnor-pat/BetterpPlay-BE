@@ -79,6 +79,16 @@ export interface IEvent extends Document {
   isRecurring?: boolean;
   recurrenceGroupId?: string;
   recurrenceFrequency?: "weekly" | "biweekly" | "monthly";
+  // Optional reference to a venue listing the event was planned from. The
+  // venue itself isn't stored in our DB — venueId is a Google Place ID.
+  // venueName is cached so we can render a "Happening at X" badge without
+  // re-fetching Place Details for every event card.
+  venueId?: string;
+  venueName?: string;
+  // The URL the user was looking at when they tapped "Plan event from this
+  // page" (e.g. the venue's official site, an Instagram post, an Eventbrite
+  // listing). Surfaced as a "View source" link on the event detail.
+  sourceUrl?: string;
 }
 
 const EventSchema: Schema = new Schema(
@@ -112,6 +122,11 @@ const EventSchema: Schema = new Schema(
       enum: ["weekly", "biweekly", "monthly", null],
       default: null,
     },
+    // Venue listing reference (Google Place ID + cached display fields).
+    // Indexed because the venue detail page queries by venueId.
+    venueId: { type: String, required: false, index: true },
+    venueName: { type: String, required: false },
+    sourceUrl: { type: String, required: false },
   },
   { timestamps: true },
 );

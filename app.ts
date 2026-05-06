@@ -10,8 +10,6 @@ import eventReminderService from "./services/eventReminderService";
 import healthRoutes from "./routes/health";
 import notificationRoutes from "./routes/notifications";
 import eventRoutes from "./routes/events";
-import venueRoutes from "./routes/venues";
-import bookingRoutes from "./routes/bookings";
 import authRoutes from "./routes/auth";
 import userRoutes from "./routes/users";
 import friendRoutes from "./routes/friends";
@@ -56,8 +54,6 @@ app.use(async (req: Request, res: Response, next: Function) => {
 app.use(healthRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/events", eventRoutes);
-app.use("/api/venues", venueRoutes);
-app.use("/api", bookingRoutes);
 app.use(authRoutes);
 app.use(userRoutes);
 app.use(friendRoutes);
