@@ -15,6 +15,7 @@ import userRoutes from "./routes/users";
 import friendRoutes from "./routes/friends";
 import userEventRoutes from "./routes/userEvents";
 import communityNoteRoutes from "./routes/communityNotes";
+import groupRoutes from "./routes/groups";
 
 const app: Application = express();
 const httpServer = createServer(app);
@@ -59,6 +60,7 @@ app.use(userRoutes);
 app.use(friendRoutes);
 app.use(userEventRoutes);
 app.use("/community-notes", communityNoteRoutes);
+app.use("/groups", groupRoutes);
 
 const PORT = process.env.PORT || 8001;
 

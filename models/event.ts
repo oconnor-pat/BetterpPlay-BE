@@ -85,6 +85,18 @@ export interface IEvent extends Document {
   // re-fetching Place Details for every event card.
   venueId?: string;
   venueName?: string;
+  // Optional reference to a Group used as the invite list at creation
+  // time. For one-off events this is metadata about origin only — the
+  // actual roster lives in `invitedUsers`, which is seeded from the
+  // Group's members but freely editable thereafter. For recurring
+  // events (PR 3) the link stays live: each new instance re-pulls the
+  // Group's current member list, so adding someone to the trivia crew
+  // means they're on next Tuesday automatically.
+  // `groupName` is cached for display so we can render the "via [Group]"
+  // badge without a second DB hit per event card (same pattern as
+  // venueName).
+  groupId?: string;
+  groupName?: string;
   // The URL the user was looking at when they tapped "Plan event from this
   // page" (e.g. the venue's official site, an Instagram post, an Eventbrite
   // listing). Surfaced as a "View source" link on the event detail.
@@ -126,6 +138,11 @@ const EventSchema: Schema = new Schema(
     // Indexed because the venue detail page queries by venueId.
     venueId: { type: String, required: false, index: true },
     venueName: { type: String, required: false },
+    // Group reference (Mongo _id) + cached display name. Indexed so we
+    // can look up "all events created from group X" cheaply, which PR 3
+    // and any future "this group's events" view will need.
+    groupId: { type: String, required: false, index: true },
+    groupName: { type: String, required: false },
     sourceUrl: { type: String, required: false },
   },
   { timestamps: true },

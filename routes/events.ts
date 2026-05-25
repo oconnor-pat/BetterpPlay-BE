@@ -2,6 +2,7 @@ import { Router, Request, Response } from "express";
 import mongoose from "mongoose";
 import Event from "../models/event";
 import User from "../models/user";
+import Group from "../models/group";
 import communityNote from "../models/communityNote";
 import notificationService from "../services/notificationService";
 import socketService from "../services/socketService";
@@ -114,12 +115,63 @@ router.get("/", async (req: Request, res: Response) => {
       commentCountMap.set(c.eventId, c.commentCount);
     });
 
+    // Build a compact member preview for each event that has a groupId
+    // attached. Used by the FE to render an avatar strip next to the
+    // group-name badge on the event card. Capped at 5 members per
+    // event — that's enough to show 3 visible + a "+N" overflow chip
+    // without bloating the response. One batched group fetch + one
+    // batched user fetch keeps this O(1) DB round trips regardless of
+    // how many events were returned.
+    const PREVIEW_LIMIT = 5;
+    const groupIds = Array.from(
+      new Set(
+        visibleEvents
+          .map((e: any) => e.groupId)
+          .filter((id: any): id is string => typeof id === "string" && !!id),
+      ),
+    );
+    const groupMembersPreviewMap = new Map<string, any[]>();
+    if (groupIds.length > 0) {
+      const groups = await Group.find({ _id: { $in: groupIds } })
+        .select("members")
+        .lean();
+      const allMemberIds = new Set<string>();
+      groups.forEach((g: any) => {
+        (g.members || [])
+          .slice(0, PREVIEW_LIMIT)
+          .forEach((m: any) => allMemberIds.add(String(m.userId)));
+      });
+      const memberUsers = await User.find({
+        _id: { $in: Array.from(allMemberIds) },
+      })
+        .select("username name profilePicUrl")
+        .lean();
+      const userById = new Map<string, any>(
+        memberUsers.map((u: any) => [String(u._id), u]),
+      );
+      groups.forEach((g: any) => {
+        const preview = (g.members || []).slice(0, PREVIEW_LIMIT).map((m: any) => {
+          const u = userById.get(String(m.userId));
+          return {
+            userId: String(m.userId),
+            username: u?.username,
+            name: u?.name,
+            profilePicUrl: u?.profilePicUrl,
+          };
+        });
+        groupMembersPreviewMap.set(String(g._id), preview);
+      });
+    }
+
     const eventsWithLikedBy = visibleEvents.map((event: any) => ({
       ...event,
       likedByUsernames: (event.likes || [])
         .map((id: string) => userNameMap.get(String(id)))
         .filter((name: string | undefined): name is string => !!name),
       commentCount: commentCountMap.get(event._id.toString()) || 0,
+      groupMembersPreview: event.groupId
+        ? groupMembersPreviewMap.get(String(event.groupId)) || []
+        : undefined,
     }));
 
     res.status(200).json(eventsWithLikedBy);
@@ -203,6 +255,7 @@ router.post("/", async (req: Request, res: Response) => {
       recurrenceCount,
       venueId,
       venueName,
+      groupId,
       sourceUrl,
     } = req.body;
 
@@ -289,6 +342,77 @@ router.post("/", async (req: Request, res: Response) => {
     const validPrivacy = ["public", "private", "invite-only"];
     const eventPrivacy = validPrivacy.includes(privacy) ? privacy : "public";
 
+    // Snapshot a Group's members into `invitedUsers` if one was attached.
+    // The FE may have already merged the group members on its side, but
+    // we re-resolve here so the server is the source of truth — guards
+    // against drift between picker and submission, and lets us cache the
+    // `groupName` for the "via [Group]" badge without an extra round
+    // trip. The creator must be a member of the group to attach it.
+    let resolvedGroupId: string | undefined;
+    let resolvedGroupName: string | undefined;
+    // Compact member preview attached to the response so the FE can
+    // render the avatar strip next to the group-name badge on the new
+    // event card without an extra round trip. Same shape the GET /
+    // handler returns. Capped at 5 to match.
+    let groupMembersPreview: Array<{
+      userId: string;
+      username?: string;
+      name?: string;
+      profilePicUrl?: string;
+    }> | undefined;
+    let mergedInvitedUsers: string[] = Array.isArray(invitedUsers)
+      ? invitedUsers.filter((id: any) => typeof id === "string" && id)
+      : [];
+
+    if (groupId && typeof groupId === "string") {
+      const group = await Group.findById(groupId);
+      if (!group) {
+        return res.status(400).json({ message: "Group not found" });
+      }
+      const isMember = (group.members as any[]).some(
+        (m) => String(m.userId) === String(createdBy),
+      );
+      if (!isMember) {
+        return res
+          .status(403)
+          .json({ message: "You must be a member of the group to attach it" });
+      }
+      resolvedGroupId = String(group._id);
+      resolvedGroupName = group.name;
+      const groupMemberIds = (group.members as any[])
+        .map((m) => String(m.userId))
+        .filter((id) => id && id !== String(createdBy));
+      // Union with any individually picked invitees — picker selections
+      // stack on top of the group, they don't replace it.
+      const seen = new Set(mergedInvitedUsers.map(String));
+      for (const id of groupMemberIds) {
+        if (!seen.has(id)) {
+          seen.add(id);
+          mergedInvitedUsers.push(id);
+        }
+      }
+
+      // Hydrate the first 5 members' display fields for the preview.
+      const previewIds = (group.members as any[])
+        .slice(0, 5)
+        .map((m) => String(m.userId));
+      const previewUsers = await User.find({ _id: { $in: previewIds } })
+        .select("username name profilePicUrl")
+        .lean();
+      const previewById = new Map<string, any>(
+        previewUsers.map((u: any) => [String(u._id), u]),
+      );
+      groupMembersPreview = previewIds.map((id) => {
+        const u = previewById.get(id);
+        return {
+          userId: id,
+          username: u?.username,
+          name: u?.name,
+          profilePicUrl: u?.profilePicUrl,
+        };
+      });
+    }
+
     const baseEventData = {
       name,
       location,
@@ -303,11 +427,15 @@ router.post("/", async (req: Request, res: Response) => {
       longitude,
       jerseyColors: jerseyColors || [],
       privacy: eventPrivacy,
-      invitedUsers: invitedUsers || [],
+      invitedUsers: mergedInvitedUsers,
       // Optional venue listing reference (set when a user planned this event
       // from the Venues tab via "Plan event from this page").
       venueId: venueId || undefined,
       venueName: venueName || undefined,
+      // Optional Group reference (set when a user picked "Invite a group"
+      // during event creation). Powers the "via [Group]" badge.
+      groupId: resolvedGroupId,
+      groupName: resolvedGroupName,
       sourceUrl: sourceUrl || undefined,
     };
 
@@ -337,10 +465,10 @@ router.post("/", async (req: Request, res: Response) => {
 
       const newEvents = await Event.insertMany(eventsToCreate);
 
-      if (invitedUsers && Array.isArray(invitedUsers) && invitedUsers.length > 0) {
+      if (mergedInvitedUsers.length > 0) {
         const currentUser = (req as any).user;
         notificationService.sendPushNotificationToMany(
-          invitedUsers,
+          mergedInvitedUsers,
           "Event Invitation 📩",
           `You've been invited to "${name}" (${count} recurring events)`,
           "event_invitation",
@@ -353,17 +481,21 @@ router.post("/", async (req: Request, res: Response) => {
       }
 
       socketService.emitToAll("events:refresh", { reason: "created" });
-      res.status(201).json(newEvents);
+      const newEventsWithPreview = newEvents.map((e: any) => ({
+        ...(e.toObject ? e.toObject() : e),
+        groupMembersPreview,
+      }));
+      res.status(201).json(newEventsWithPreview);
     } else {
       const newEvent = await Event.create({
         ...baseEventData,
         date,
       });
 
-      if (invitedUsers && Array.isArray(invitedUsers) && invitedUsers.length > 0) {
+      if (mergedInvitedUsers.length > 0) {
         const currentUser = (req as any).user;
         notificationService.sendPushNotificationToMany(
-          invitedUsers,
+          mergedInvitedUsers,
           "Event Invitation 📩",
           `You've been invited to "${name}"`,
           "event_invitation",
@@ -376,7 +508,10 @@ router.post("/", async (req: Request, res: Response) => {
       }
 
       socketService.emitToAll("events:refresh", { reason: "created" });
-      res.status(201).json(newEvent);
+      res.status(201).json({
+        ...newEvent.toObject(),
+        groupMembersPreview,
+      });
     }
   } catch (error) {
     console.error("Error creating event:", error);
