@@ -990,10 +990,23 @@ router.delete(
 
 router.delete("/:id", async (req: Request, res: Response) => {
   try {
+    const currentUser = (req as any).user;
+    if (!currentUser || !currentUser.id) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
     const eventId = req.params.id;
     const event = await Event.findById(eventId);
     if (!event) {
       return res.status(404).json({ message: "Event not found" });
+    }
+    // Only the event creator can delete it. Mirrors the rule the series
+    // delete route enforces — without this, anyone with an event id
+    // could DELETE it (the FE already sends an auth header so this
+    // check doesn't break the existing client flow).
+    if (String(event.createdBy) !== String(currentUser.id)) {
+      return res
+        .status(403)
+        .json({ message: "Only the event creator can delete this event" });
     }
     await Event.findByIdAndDelete(eventId);
     res.sendStatus(204);
