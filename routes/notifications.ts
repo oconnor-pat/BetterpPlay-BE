@@ -98,6 +98,9 @@ router.get(
             eventRoster: preferences.eventRoster,
             eventReminders: preferences.eventReminders,
             communityNotes: preferences.communityNotes,
+            groupAdded: preferences.groupAdded,
+            groupRoleChanged: preferences.groupRoleChanged,
+            groupEvents: preferences.groupEvents,
             pushEnabled: preferences.pushEnabled,
           },
         });
@@ -131,6 +134,9 @@ router.put(
         eventRoster,
         eventReminders,
         communityNotes,
+        groupAdded,
+        groupRoleChanged,
+        groupEvents,
         pushEnabled,
       } = req.body;
 
@@ -146,6 +152,10 @@ router.put(
         updates.eventReminders = eventReminders;
       if (typeof communityNotes === "boolean")
         updates.communityNotes = communityNotes;
+      if (typeof groupAdded === "boolean") updates.groupAdded = groupAdded;
+      if (typeof groupRoleChanged === "boolean")
+        updates.groupRoleChanged = groupRoleChanged;
+      if (typeof groupEvents === "boolean") updates.groupEvents = groupEvents;
       if (typeof pushEnabled === "boolean") updates.pushEnabled = pushEnabled;
 
       const preferences =
@@ -165,6 +175,9 @@ router.put(
             eventRoster: preferences.eventRoster,
             eventReminders: preferences.eventReminders,
             communityNotes: preferences.communityNotes,
+            groupAdded: preferences.groupAdded,
+            groupRoleChanged: preferences.groupRoleChanged,
+            groupEvents: preferences.groupEvents,
             pushEnabled: preferences.pushEnabled,
           },
         });

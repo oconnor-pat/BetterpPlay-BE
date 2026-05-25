@@ -18,6 +18,10 @@ export interface INotification extends Document {
     | "event_spot_available"
     | "event_waitlist_join"
     | "community_note"
+    | "group_added"
+    | "group_event_created"
+    | "group_admin_promoted"
+    | "group_ownership_transferred"
     | "general";
   data?: Record<string, any>;
   read: boolean;
@@ -57,6 +61,10 @@ const NotificationSchema: Schema = new Schema(
         "event_spot_available",
         "event_waitlist_join",
         "community_note",
+        "group_added",
+        "group_event_created",
+        "group_admin_promoted",
+        "group_ownership_transferred",
         "general",
       ],
       required: true,

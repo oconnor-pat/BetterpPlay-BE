@@ -134,6 +134,10 @@ export type NotificationType =
   | "event_spot_available"
   | "event_waitlist_join"
   | "community_note"
+  | "group_added"
+  | "group_event_created"
+  | "group_admin_promoted"
+  | "group_ownership_transferred"
   | "general";
 
 interface SendNotificationOptions {
@@ -196,6 +200,22 @@ export const sendPushNotification = async (
           break;
         case "community_note":
           if (!preferences.communityNotes) return false;
+          break;
+        // For the group prefs we check `=== false` rather than `!field`
+        // so that existing NotificationPreferences documents (created
+        // before these fields were added to the schema, and therefore
+        // missing them as `undefined`) get the default-on behavior the
+        // schema intends. Mongoose only applies `default: true` at
+        // document creation, not on read of existing rows.
+        case "group_added":
+          if (preferences.groupAdded === false) return false;
+          break;
+        case "group_admin_promoted":
+        case "group_ownership_transferred":
+          if (preferences.groupRoleChanged === false) return false;
+          break;
+        case "group_event_created":
+          if (preferences.groupEvents === false) return false;
           break;
       }
     }

@@ -363,6 +363,10 @@ router.post("/", async (req: Request, res: Response) => {
     let mergedInvitedUsers: string[] = Array.isArray(invitedUsers)
       ? invitedUsers.filter((id: any) => typeof id === "string" && id)
       : [];
+    // Tracked so the post-create notification step can give group
+    // members a group-flavored push ("Beacon trivia has a new event")
+    // and non-group invitees the generic event invitation.
+    const groupMemberIdSet = new Set<string>();
 
     if (groupId && typeof groupId === "string") {
       const group = await Group.findById(groupId);
@@ -382,6 +386,7 @@ router.post("/", async (req: Request, res: Response) => {
       const groupMemberIds = (group.members as any[])
         .map((m) => String(m.userId))
         .filter((id) => id && id !== String(createdBy));
+      groupMemberIds.forEach((id) => groupMemberIdSet.add(id));
       // Union with any individually picked invitees — picker selections
       // stack on top of the group, they don't replace it.
       const seen = new Set(mergedInvitedUsers.map(String));
@@ -467,17 +472,43 @@ router.post("/", async (req: Request, res: Response) => {
 
       if (mergedInvitedUsers.length > 0) {
         const currentUser = (req as any).user;
-        notificationService.sendPushNotificationToMany(
-          mergedInvitedUsers,
-          "Event Invitation 📩",
-          `You've been invited to "${name}" (${count} recurring events)`,
-          "event_invitation",
-          {
-            eventId: newEvents[0]._id.toString(),
-            eventName: name,
-            invitedBy: (currentUser?.id || createdBy).toString(),
-          },
+        // Split the invitee list so group members get the group-flavored
+        // notification (highlights the ritual context) while one-off
+        // invitees get the standard event invitation.
+        const groupRecipients = mergedInvitedUsers.filter((id) =>
+          groupMemberIdSet.has(id),
         );
+        const explicitRecipients = mergedInvitedUsers.filter(
+          (id) => !groupMemberIdSet.has(id),
+        );
+        if (groupRecipients.length > 0 && resolvedGroupName) {
+          notificationService.sendPushNotificationToMany(
+            groupRecipients,
+            `${resolvedGroupName} has a new event`,
+            `${name} — ${count} recurring events scheduled`,
+            "group_event_created",
+            {
+              eventId: newEvents[0]._id.toString(),
+              eventName: name,
+              groupId: resolvedGroupId || "",
+              groupName: resolvedGroupName,
+              invitedBy: (currentUser?.id || createdBy).toString(),
+            },
+          );
+        }
+        if (explicitRecipients.length > 0) {
+          notificationService.sendPushNotificationToMany(
+            explicitRecipients,
+            "Event Invitation 📩",
+            `You've been invited to "${name}" (${count} recurring events)`,
+            "event_invitation",
+            {
+              eventId: newEvents[0]._id.toString(),
+              eventName: name,
+              invitedBy: (currentUser?.id || createdBy).toString(),
+            },
+          );
+        }
       }
 
       socketService.emitToAll("events:refresh", { reason: "created" });
@@ -494,17 +525,40 @@ router.post("/", async (req: Request, res: Response) => {
 
       if (mergedInvitedUsers.length > 0) {
         const currentUser = (req as any).user;
-        notificationService.sendPushNotificationToMany(
-          mergedInvitedUsers,
-          "Event Invitation 📩",
-          `You've been invited to "${name}"`,
-          "event_invitation",
-          {
-            eventId: newEvent._id.toString(),
-            eventName: name,
-            invitedBy: (currentUser?.id || createdBy).toString(),
-          },
+        const groupRecipients = mergedInvitedUsers.filter((id) =>
+          groupMemberIdSet.has(id),
         );
+        const explicitRecipients = mergedInvitedUsers.filter(
+          (id) => !groupMemberIdSet.has(id),
+        );
+        if (groupRecipients.length > 0 && resolvedGroupName) {
+          notificationService.sendPushNotificationToMany(
+            groupRecipients,
+            `${resolvedGroupName} has a new event`,
+            `${name} — ${date}`,
+            "group_event_created",
+            {
+              eventId: newEvent._id.toString(),
+              eventName: name,
+              groupId: resolvedGroupId || "",
+              groupName: resolvedGroupName,
+              invitedBy: (currentUser?.id || createdBy).toString(),
+            },
+          );
+        }
+        if (explicitRecipients.length > 0) {
+          notificationService.sendPushNotificationToMany(
+            explicitRecipients,
+            "Event Invitation 📩",
+            `You've been invited to "${name}"`,
+            "event_invitation",
+            {
+              eventId: newEvent._id.toString(),
+              eventName: name,
+              invitedBy: (currentUser?.id || createdBy).toString(),
+            },
+          );
+        }
       }
 
       socketService.emitToAll("events:refresh", { reason: "created" });

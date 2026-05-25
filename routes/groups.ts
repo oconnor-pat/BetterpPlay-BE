@@ -2,8 +2,21 @@ import { Router, Request, Response } from "express";
 import Group, { IGroup, IGroupMember } from "../models/group";
 import User from "../models/user";
 import groupEventLink from "../services/groupEventLink";
+import notificationService from "../services/notificationService";
 
 const router = Router();
+
+// Helper for notification body wording. Falls back to "Someone" if we
+// can't resolve the actor's user record, which keeps the push readable
+// instead of saying "undefined added you to..." on edge cases.
+const actorDisplayName = async (userId: string): Promise<string> => {
+  try {
+    const u = await User.findById(userId).select("name username").lean();
+    return (u as any)?.name || (u as any)?.username || "Someone";
+  } catch {
+    return "Someone";
+  }
+};
 
 // Auth helper — every route in this file requires a logged-in user.
 // Returns the userId on success or null after sending a 401 response.
@@ -115,6 +128,22 @@ router.post("/", async (req: Request, res: Response) => {
         ...deduped,
       ],
     });
+
+    // Notify each initial member (not the creator) that they were added.
+    // Same notification path as `POST /:id/members` so users see the
+    // same "Welcome to {Group}" message whether they were added at
+    // creation or later.
+    if (deduped.length > 0) {
+      const actorName = await actorDisplayName(userId);
+      notificationService.sendPushNotificationToMany(
+        deduped.map((m) => m.userId),
+        `Welcome to ${group.name}`,
+        `${actorName} added you to the group`,
+        "group_added",
+        { groupId: String(group._id), groupName: group.name },
+      );
+    }
+
     return res.status(201).json({ success: true, group: await serializeGroup(group) });
   } catch (err) {
     console.error("Failed to create group:", err);
@@ -299,6 +328,17 @@ router.post("/:id/members", async (req: Request, res: Response) => {
 
     await groupEventLink.refreshRecurringInvitesForGroup(String(group._id));
 
+    // Welcome the newly added member. Same wording as the create-with-
+    // initial-members path so the experience is symmetric.
+    const actorName = await actorDisplayName(userId);
+    notificationService.sendPushNotification({
+      userId: targetId,
+      title: `Welcome to ${group.name}`,
+      body: `${actorName} added you to the group`,
+      type: "group_added",
+      data: { groupId: String(group._id), groupName: group.name },
+    });
+
     return res
       .status(201)
       .json({ success: true, group: await serializeGroup(group) });
@@ -412,8 +452,22 @@ router.patch(
       if (idx === -1) {
         return res.status(404).json({ message: "Member not found in group" });
       }
+      const previousRole = (group.members as IGroupMember[])[idx].role;
       (group.members as IGroupMember[])[idx].role = role;
       await group.save();
+
+      // Only notify on a real transition into admin. Demotions stay
+      // quiet — "you're not an admin anymore" is awkward to push and
+      // the target user can see their role in the app.
+      if (previousRole !== "admin" && role === "admin") {
+        notificationService.sendPushNotification({
+          userId: targetId,
+          title: "You're now an admin",
+          body: `You can manage members and settings in ${group.name}`,
+          type: "group_admin_promoted",
+          data: { groupId: String(group._id), groupName: group.name },
+        });
+      }
 
       return res
         .status(200)
@@ -468,6 +522,17 @@ router.post("/:id/transfer", async (req: Request, res: Response) => {
       members[successorIdx].role = "admin";
     }
     await group.save();
+
+    // Tell the successor they've inherited the group. High-signal —
+    // they should know they're now responsible for it.
+    const actorName = await actorDisplayName(callerId);
+    notificationService.sendPushNotification({
+      userId: successorId,
+      title: "You're now the group creator",
+      body: `${actorName} transferred ${group.name} to you`,
+      type: "group_ownership_transferred",
+      data: { groupId: String(group._id), groupName: group.name },
+    });
 
     return res
       .status(200)

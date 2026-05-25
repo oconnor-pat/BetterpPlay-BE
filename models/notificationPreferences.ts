@@ -9,6 +9,16 @@ export interface INotificationPreferences extends Document {
   eventReminders: boolean;
   eventActivity: boolean;
   communityNotes: boolean;
+  // Group activity preferences. Three buckets for granular muting:
+  //   - groupAdded: "{X} added you to {Group}"
+  //   - groupRoleChanged: promoted to admin, ownership transferred to you
+  //   - groupEvents: a new event was scheduled in a group you're in
+  // Splitting them lets users keep the high-signal "you're now in this
+  // group / now an admin" pings while muting the chattier event-creation
+  // stream from groups they're passively in.
+  groupAdded: boolean;
+  groupRoleChanged: boolean;
+  groupEvents: boolean;
   pushEnabled: boolean;
   createdAt: Date;
   updatedAt: Date;
@@ -48,6 +58,18 @@ const NotificationPreferencesSchema: Schema = new Schema(
       default: true,
     },
     communityNotes: {
+      type: Boolean,
+      default: true,
+    },
+    groupAdded: {
+      type: Boolean,
+      default: true,
+    },
+    groupRoleChanged: {
+      type: Boolean,
+      default: true,
+    },
+    groupEvents: {
       type: Boolean,
       default: true,
     },
