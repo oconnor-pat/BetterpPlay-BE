@@ -941,11 +941,29 @@ router.delete(
 
       const { recurrenceGroupId } = req.params;
 
-      const sample = await Event.findOne({ recurrenceGroupId });
+      // Series delete is scoped to future-dated instances only. Past
+      // instances stay as immutable history — same principle the live
+      // link service follows for member-roster propagation. The user's
+      // intent here is "stop doing this thing going forward," not "erase
+      // the fact that we ever did it." Matches the iOS/Google Calendar
+      // convention for "Delete entire series" as well.
+      const d = new Date();
+      const todayString =
+        `${d.getFullYear()}-` +
+        `${String(d.getMonth() + 1).padStart(2, "0")}-` +
+        `${String(d.getDate()).padStart(2, "0")}`;
+
+      // Look up a future sample so the 404/403 gates also tell us
+      // there's actually something future to delete. A dead series with
+      // only past instances correctly returns 404 — nothing to do.
+      const sample = await Event.findOne({
+        recurrenceGroupId,
+        date: { $gte: todayString },
+      });
       if (!sample) {
         return res
           .status(404)
-          .json({ message: "No events found for this series" });
+          .json({ message: "No future events found for this series" });
       }
 
       if (String(sample.createdBy) !== currentUser.id) {
@@ -954,7 +972,10 @@ router.delete(
           .json({ message: "Only the event creator can delete the series" });
       }
 
-      const result = await Event.deleteMany({ recurrenceGroupId });
+      const result = await Event.deleteMany({
+        recurrenceGroupId,
+        date: { $gte: todayString },
+      });
 
       res.status(200).json({
         success: true,
