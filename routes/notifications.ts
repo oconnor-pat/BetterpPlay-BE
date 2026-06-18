@@ -97,6 +97,7 @@ router.get(
             eventUpdates: preferences.eventUpdates,
             eventRoster: preferences.eventRoster,
             eventReminders: preferences.eventReminders,
+            eventActivity: preferences.eventActivity,
             communityNotes: preferences.communityNotes,
             groupAdded: preferences.groupAdded,
             groupRoleChanged: preferences.groupRoleChanged,
@@ -133,6 +134,7 @@ router.put(
         eventUpdates,
         eventRoster,
         eventReminders,
+        eventActivity,
         communityNotes,
         groupAdded,
         groupRoleChanged,
@@ -150,6 +152,12 @@ router.put(
       if (typeof eventRoster === "boolean") updates.eventRoster = eventRoster;
       if (typeof eventReminders === "boolean")
         updates.eventReminders = eventReminders;
+      // eventActivity gates likes/joins/leaves/comments. It was in the
+      // schema and the push-gating switch from day one but never wired
+      // into this route, so the client's "Event Activity" toggle had no
+      // server effect until now.
+      if (typeof eventActivity === "boolean")
+        updates.eventActivity = eventActivity;
       if (typeof communityNotes === "boolean")
         updates.communityNotes = communityNotes;
       if (typeof groupAdded === "boolean") updates.groupAdded = groupAdded;
@@ -174,6 +182,7 @@ router.put(
             eventUpdates: preferences.eventUpdates,
             eventRoster: preferences.eventRoster,
             eventReminders: preferences.eventReminders,
+            eventActivity: preferences.eventActivity,
             communityNotes: preferences.communityNotes,
             groupAdded: preferences.groupAdded,
             groupRoleChanged: preferences.groupRoleChanged,
