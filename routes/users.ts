@@ -140,7 +140,12 @@ router.get("/users", async (req: Request, res: Response) => {
 
       const matchFilter: any = {};
       if (search && typeof search === "string") {
-        matchFilter.username = { $regex: search, $options: "i" };
+        // Match against both username and display name so people can be
+        // found by who they are, not just their handle. Escape regex
+        // metacharacters so a stray "(" etc. in the query can't throw.
+        const safe = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const term = { $regex: safe, $options: "i" };
+        matchFilter.$or = [{ username: term }, { name: term }];
       }
       const activityFilter = activity || sport;
       if (activityFilter && typeof activityFilter === "string") {
@@ -160,7 +165,11 @@ router.get("/users", async (req: Request, res: Response) => {
       let filter: any = {};
 
       if (search && typeof search === "string") {
-        filter.username = { $regex: search, $options: "i" };
+        // Match against both username and display name (see proximity
+        // branch above). Escape regex metacharacters for safety.
+        const safe = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const term = { $regex: safe, $options: "i" };
+        filter.$or = [{ username: term }, { name: term }];
       }
 
       const activityFilter = activity || sport;
