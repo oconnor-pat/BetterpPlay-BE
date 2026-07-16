@@ -3,11 +3,74 @@ import mongoose from "mongoose";
 import Event from "../models/event";
 import User from "../models/user";
 import Group from "../models/group";
+import GroupMessage from "../models/groupMessage";
 import communityNote from "../models/communityNote";
 import notificationService from "../services/notificationService";
 import socketService from "../services/socketService";
 
 const router = Router();
+
+// Drop a system message into a group's chat when an event is scheduled
+// from that group, so the conversation and the plans it produces live in
+// one thread. Best-effort: chat is a nicety, never block event creation
+// on it. Broadcasts to the live thread and each member's Groups tab.
+const postGroupEventSystemMessage = async (params: {
+  groupId: string;
+  actorId: string;
+  eventId: string;
+  eventName: string;
+  eventDate?: string;
+  text: string;
+}): Promise<void> => {
+  try {
+    const group = await Group.findById(params.groupId).select("members").lean();
+    if (!group) return;
+    const actor = await User.findById(params.actorId)
+      .select("username name profilePicUrl")
+      .lean();
+    const created = await GroupMessage.create({
+      groupId: params.groupId,
+      userId: params.actorId,
+      username: (actor as any)?.username || (actor as any)?.name || "Member",
+      profilePicUrl: (actor as any)?.profilePicUrl,
+      text: params.text,
+      kind: "system",
+      eventRef: {
+        eventId: params.eventId,
+        eventName: params.eventName,
+        eventDate: params.eventDate,
+      },
+    });
+    const message = {
+      _id: created._id,
+      groupId: created.groupId,
+      userId: created.userId,
+      username: created.username,
+      profilePicUrl: created.profilePicUrl,
+      text: created.text,
+      kind: created.kind,
+      eventRef: created.eventRef,
+      createdAt: created.createdAt,
+    };
+    socketService.emitToGroup(params.groupId, "group:message:new", message);
+    const memberIds = ((group as any).members || []).map((m: any) =>
+      String(m.userId),
+    );
+    socketService.emitToUsers(memberIds, "group:activity", {
+      groupId: params.groupId,
+      senderId: params.actorId,
+      lastMessage: {
+        text: message.text,
+        kind: message.kind,
+        username: message.username,
+        senderId: message.userId,
+        createdAt: message.createdAt,
+      },
+    });
+  } catch (err) {
+    console.error("Failed to post group system message:", err);
+  }
+};
 
 router.get("/", async (req: Request, res: Response) => {
   try {
@@ -518,6 +581,17 @@ router.post("/", async (req: Request, res: Response) => {
         }
       }
 
+      if (resolvedGroupId && resolvedGroupName) {
+        await postGroupEventSystemMessage({
+          groupId: resolvedGroupId,
+          actorId: ((req as any).user?.id || createdBy).toString(),
+          eventId: newEvents[0]._id.toString(),
+          eventName: name,
+          eventDate: newEvents[0].date,
+          text: `📅 ${name} scheduled — ${count} recurring events`,
+        });
+      }
+
       socketService.emitToAll("events:refresh", { reason: "created" });
       const newEventsWithPreview = newEvents.map((e: any) => ({
         ...(e.toObject ? e.toObject() : e),
@@ -566,6 +640,17 @@ router.post("/", async (req: Request, res: Response) => {
             },
           );
         }
+      }
+
+      if (resolvedGroupId && resolvedGroupName) {
+        await postGroupEventSystemMessage({
+          groupId: resolvedGroupId,
+          actorId: ((req as any).user?.id || createdBy).toString(),
+          eventId: newEvent._id.toString(),
+          eventName: name,
+          eventDate: date,
+          text: `📅 ${name} scheduled for ${date}`,
+        });
       }
 
       socketService.emitToAll("events:refresh", { reason: "created" });

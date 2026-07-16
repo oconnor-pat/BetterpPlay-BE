@@ -26,6 +26,7 @@ export interface INotification extends Document {
     | "group_event_created"
     | "group_admin_promoted"
     | "group_ownership_transferred"
+    | "group_message"
     | "general";
   data?: Record<string, any>;
   read: boolean;
@@ -73,6 +74,7 @@ const NotificationSchema: Schema = new Schema(
         "group_event_created",
         "group_admin_promoted",
         "group_ownership_transferred",
+        "group_message",
         "general",
       ],
       required: true,

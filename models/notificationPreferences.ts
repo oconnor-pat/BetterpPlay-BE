@@ -19,6 +19,10 @@ export interface INotificationPreferences extends Document {
   groupAdded: boolean;
   groupRoleChanged: boolean;
   groupEvents: boolean;
+  // New group chat messages ("{X}: let's move it to 8pm"). Its own
+  // bucket so the chattiest group stream can be muted independently of
+  // the higher-signal add/role/event pings.
+  groupMessages: boolean;
   pushEnabled: boolean;
   createdAt: Date;
   updatedAt: Date;
@@ -70,6 +74,10 @@ const NotificationPreferencesSchema: Schema = new Schema(
       default: true,
     },
     groupEvents: {
+      type: Boolean,
+      default: true,
+    },
+    groupMessages: {
       type: Boolean,
       default: true,
     },
