@@ -174,7 +174,12 @@ router.get("/", async (req: Request, res: Response) => {
         : undefined,
     }));
 
-    res.status(200).json(eventsWithLikedBy);
+    // Gate public events per-viewer: locked ones collapse to a teaser.
+    const projected = eventsWithLikedBy.map((event: any) =>
+      projectEventForViewer(event, currentUserId ? String(currentUserId) : null),
+    );
+
+    res.status(200).json(projected);
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch events" });
   }
@@ -228,7 +233,9 @@ router.get("/:id", async (req: Request, res: Response) => {
       })
       .filter((name: string | undefined): name is string => !!name);
 
-    res.status(200).json({ ...event, likedByUsernames });
+    res
+      .status(200)
+      .json(projectEventForViewer({ ...event, likedByUsernames }, currentUserId));
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch event" });
   }
@@ -729,6 +736,24 @@ router.post("/:id/roster", async (req: Request, res: Response) => {
       return res.status(409).json({ message: "Participant already in roster" });
     }
 
+    // Public events are gated: a user can't add themselves directly, they
+    // must request to join and be approved. The creator can still add anyone.
+    const actorId = (req as any).user?.id
+      ? String((req as any).user.id)
+      : null;
+    if (
+      (event.privacy || "public") === "public" &&
+      entry.userId &&
+      actorId &&
+      String(entry.userId) === actorId &&
+      String(event.createdBy) !== actorId
+    ) {
+      return res.status(403).json({
+        message: "This event requires approval — request to join instead.",
+        requiresApproval: true,
+      });
+    }
+
     // Clear expired reservation if present
     if (
       event.spotReservation &&
@@ -780,6 +805,9 @@ router.post("/:id/roster", async (req: Request, res: Response) => {
       event.waitlist = event.waitlist.filter(
         (w: any) => w.userId !== entry.userId,
       );
+      // Joining the roster clears any prior "maybe"/"can't" reply so a user
+      // is only ever in one place.
+      event.rsvps = event.rsvps.filter((r: any) => r.userId !== entry.userId);
     }
 
     await event.save();
@@ -810,6 +838,7 @@ router.post("/:id/roster", async (req: Request, res: Response) => {
       rosterSpotsFilled: event.rosterSpotsFilled,
       spotReservation: event.spotReservation,
     });
+    broadcastRosterChanged(event);
     socketService.emitToAll("events:refresh", { reason: "roster_join", eventId });
 
     return res.status(200).json({ success: true, roster: event.roster });
@@ -823,6 +852,171 @@ router.post("/:id/roster", async (req: Request, res: Response) => {
 
 // How long a waitlisted user has to claim their spot (in minutes)
 const SPOT_RESERVATION_MINUTES = 15;
+
+// Reserve a freed spot for the first waitlisted user and schedule the
+// reservation's expiry. Used by the "RSVP maybe/can't" path so a seat that
+// frees up when someone backs out promotes the waitlist the same way leaving
+// the roster does. Caller decides whether the event was full before calling.
+function promoteWaitlistIfNeeded(event: any, eventId: string): void {
+  if (!event.waitlist || event.waitlist.length === 0) {
+    return;
+  }
+  const nextInLine = event.waitlist.shift()!;
+  const expiresAt = new Date(Date.now() + SPOT_RESERVATION_MINUTES * 60 * 1000);
+  event.spotReservation = {
+    userId: nextInLine.userId,
+    username: nextInLine.username,
+    profilePicUrl: nextInLine.profilePicUrl,
+    expiresAt,
+  };
+
+  notificationService.sendPushNotification({
+    userId: nextInLine.userId,
+    title: "A spot opened up! 🎉",
+    body: `A spot in "${event.name}" is reserved for you for ${SPOT_RESERVATION_MINUTES} minutes. Tap to claim it!`,
+    type: "event_spot_available",
+    data: { eventId: event._id.toString(), eventName: event.name },
+  });
+
+  setTimeout(
+    async () => {
+      try {
+        const freshEvent = await Event.findById(eventId);
+        if (
+          freshEvent?.spotReservation &&
+          freshEvent.spotReservation.userId === nextInLine.userId &&
+          new Date(freshEvent.spotReservation.expiresAt) <= new Date()
+        ) {
+          freshEvent.spotReservation = null;
+          if (freshEvent.waitlist && freshEvent.waitlist.length > 0) {
+            const nextNext = freshEvent.waitlist.shift()!;
+            const newExpiry = new Date(
+              Date.now() + SPOT_RESERVATION_MINUTES * 60 * 1000,
+            );
+            freshEvent.spotReservation = {
+              userId: nextNext.userId,
+              username: nextNext.username,
+              profilePicUrl: nextNext.profilePicUrl,
+              expiresAt: newExpiry,
+            };
+            notificationService.sendPushNotification({
+              userId: nextNext.userId,
+              title: "A spot opened up! 🎉",
+              body: `A spot in "${freshEvent.name}" is reserved for you for ${SPOT_RESERVATION_MINUTES} minutes. Tap to claim it!`,
+              type: "event_spot_available",
+              data: {
+                eventId: freshEvent._id.toString(),
+                eventName: freshEvent.name,
+              },
+            });
+          }
+          await freshEvent.save();
+          socketService.emitToEvent(eventId, "roster:updated", {
+            eventId,
+            roster: freshEvent.roster,
+            rosterSpotsFilled: freshEvent.rosterSpotsFilled,
+            waitlist: freshEvent.waitlist,
+            spotReservation: freshEvent.spotReservation,
+          });
+          socketService.emitToAll("events:refresh", {
+            reason: "reservation_expired",
+            eventId,
+          });
+        }
+      } catch (err) {
+        console.error("Error processing reservation expiry:", err);
+      }
+    },
+    SPOT_RESERVATION_MINUTES * 60 * 1000 + 5000,
+  );
+}
+
+// Push a roster/RSVP patch to the clients that should see it so their event
+// card updates instantly (the events list isn't in the event's socket room).
+// Public events go to everyone; private/invite-only events go only to the
+// creator and invited users so roster PII isn't leaked to outsiders.
+function broadcastRosterChanged(event: any): void {
+  const payload = {
+    eventId: event._id.toString(),
+    roster: event.roster,
+    rsvps: event.rsvps,
+    rosterSpotsFilled: event.rosterSpotsFilled,
+  };
+  // Roster identities are gated — public events hide their roster until a
+  // requester is approved — so only push this detailed patch to people who
+  // are allowed to see it: the creator, anyone already on the roster, and
+  // any invited users. A no-PII "events:refresh" broadcast (sent separately)
+  // is what nudges everyone else to refetch a privacy-filtered copy.
+  const recipients = new Set<string>([String(event.createdBy)]);
+  (event.roster || []).forEach((p: any) => {
+    if (p.userId) {
+      recipients.add(String(p.userId));
+    }
+  });
+  (event.invitedUsers || []).forEach((id: any) =>
+    recipients.add(String(id)),
+  );
+  socketService.emitToUsers(
+    Array.from(recipients),
+    "event:rosterChanged",
+    payload,
+  );
+}
+
+// Project an event for a specific viewer. Public events are gated: a viewer
+// who isn't the creator and hasn't been approved onto the roster sees only a
+// teaser (name, type, organizer, date/time, spots) plus their own request
+// status. Everything sensitive — address, coordinates/map, roster identities,
+// description, venue, source link, group — is stripped until approval. Only
+// the creator ever receives the pending join-request list.
+function projectEventForViewer(event: any, viewerId: string | null): any {
+  const privacy = event.privacy || "public";
+  const isCreator = !!viewerId && String(event.createdBy) === String(viewerId);
+  const onRoster =
+    !!viewerId &&
+    (event.roster || []).some(
+      (p: any) => String(p.userId) === String(viewerId),
+    );
+
+  if (privacy === "public" && !isCreator && !onRoster) {
+    const pending =
+      !!viewerId &&
+      (event.joinRequests || []).some(
+        (r: any) => String(r.userId) === String(viewerId),
+      );
+    return {
+      _id: event._id,
+      name: event.name,
+      eventType: event.eventType,
+      date: event.date,
+      time: event.time,
+      totalSpots: event.totalSpots,
+      rosterSpotsFilled:
+        event.rosterSpotsFilled ?? (event.roster || []).length,
+      createdBy: event.createdBy,
+      createdByUsername: event.createdByUsername,
+      privacy,
+      isRecurring: event.isRecurring,
+      recurrenceGroupId: event.recurrenceGroupId,
+      recurrenceFrequency: event.recurrenceFrequency,
+      createdAt: event.createdAt,
+      likes: event.likes || [],
+      isGated: true,
+      myJoinRequestStatus: pending ? "pending" : "none",
+      roster: [],
+      rsvps: [],
+      waitlist: [],
+      joinRequests: [],
+    };
+  }
+
+  const full: any = { ...event, isGated: false, myJoinRequestStatus: "none" };
+  if (!isCreator) {
+    // Non-creators (even approved ones) never see who else is waiting.
+    full.joinRequests = [];
+  }
+  return full;
+}
 
 router.delete(
   "/:id/roster/:username",
@@ -941,6 +1135,7 @@ router.delete(
         waitlist: event.waitlist,
         spotReservation: event.spotReservation,
       });
+      broadcastRosterChanged(event);
       socketService.emitToAll("events:refresh", { reason: "roster_leave", eventId });
 
       return res.status(200).json({ success: true, roster: event.roster });
@@ -949,6 +1144,352 @@ router.delete(
       return res
         .status(500)
         .json({ message: "Error removing participant from roster" });
+    }
+  },
+);
+
+// Set the current user's RSVP for an event. "Going" lives on the roster
+// (which owns spot counts); "maybe"/"cant" live in `rsvps`. A user is only
+// ever in one place, so switching states moves them between the two.
+router.put("/:id/rsvp", async (req: Request, res: Response) => {
+  const eventId = req.params.id;
+  const { userId, username, profilePicUrl, status } = req.body;
+  if (
+    !userId ||
+    !username ||
+    !["going", "maybe", "cant"].includes(status)
+  ) {
+    return res.status(400).json({ message: "Missing or invalid RSVP data" });
+  }
+  try {
+    const event = await Event.findById(eventId);
+    if (!event) {
+      return res.status(404).json({ message: "Event not found" });
+    }
+
+    // Public events are gated — non-creators join via request/approval, not by
+    // RSVPing. The 3-way RSVP is for invite-only events (and the creator).
+    if (
+      (event.privacy || "public") === "public" &&
+      String(event.createdBy) !== String(userId)
+    ) {
+      return res.status(403).json({
+        message: "This event requires approval — request to join instead.",
+        requiresApproval: true,
+      });
+    }
+
+    const onRoster = event.roster.some((p: any) => p.userId === userId);
+
+    if (status === "going") {
+      // Drop any maybe/cant reply, then take a roster spot if there's room
+      // (respecting a spot briefly held for a waitlisted user).
+      event.rsvps = event.rsvps.filter((r: any) => r.userId !== userId);
+      if (!onRoster) {
+        const reservationForOther =
+          !!event.spotReservation &&
+          event.spotReservation.userId !== userId &&
+          new Date(event.spotReservation.expiresAt) > new Date();
+        const capacity = reservationForOther
+          ? event.totalSpots - 1
+          : event.totalSpots;
+        if (event.roster.length >= capacity) {
+          return res.status(400).json({ message: "Event is full", full: true });
+        }
+        event.roster.push({
+          username,
+          paidStatus: "Unpaid",
+          userId,
+          profilePicUrl,
+        } as any);
+        event.rosterSpotsFilled = event.roster.length;
+        if (event.spotReservation && event.spotReservation.userId === userId) {
+          event.spotReservation = null;
+        }
+        event.waitlist = event.waitlist.filter((w: any) => w.userId !== userId);
+      }
+    } else {
+      // Maybe / can't: free their roster spot (promoting the waitlist if the
+      // event was full), then record the reply.
+      const wasFull = event.roster.length >= event.totalSpots;
+      if (onRoster) {
+        event.roster = event.roster.filter((p: any) => p.userId !== userId);
+        event.rosterSpotsFilled = event.roster.length;
+        if (wasFull) {
+          promoteWaitlistIfNeeded(event, eventId);
+        }
+      }
+      event.rsvps = event.rsvps.filter((r: any) => r.userId !== userId);
+      event.rsvps.push({
+        userId,
+        username,
+        profilePicUrl,
+        status,
+        respondedAt: new Date(),
+      } as any);
+    }
+
+    await event.save();
+
+    // Let the organizer see how people are responding.
+    if (event.createdBy && String(event.createdBy) !== String(userId)) {
+      const label =
+        status === "going"
+          ? "is going to"
+          : status === "maybe"
+            ? "might make"
+            : "can't make";
+      notificationService.sendPushNotification({
+        userId: String(event.createdBy),
+        title: "RSVP update",
+        body: `${username} ${label} "${event.name}"`,
+        type: "event_rsvp",
+        data: { eventId: event._id.toString(), eventName: event.name },
+      });
+    }
+
+    socketService.emitToEvent(eventId, "roster:updated", {
+      eventId,
+      roster: event.roster,
+      rosterSpotsFilled: event.rosterSpotsFilled,
+      rsvps: event.rsvps,
+      spotReservation: event.spotReservation,
+    });
+    // Push a targeted patch (privacy-scoped) so any client showing this
+    // event's card — e.g. the organizer on the events list — updates its
+    // roster/RSVP counts instantly without a full refetch.
+    broadcastRosterChanged(event);
+    socketService.emitToAll("events:refresh", { reason: "rsvp", eventId });
+
+    return res.status(200).json({
+      success: true,
+      roster: event.roster,
+      rsvps: event.rsvps,
+      rosterSpotsFilled: event.rosterSpotsFilled,
+    });
+  } catch (error) {
+    console.error("Error updating RSVP:", error);
+    return res.status(500).json({ message: "Error updating RSVP" });
+  }
+});
+
+// Clear the current user's maybe/cant reply (e.g. tapping the active state
+// off). Clearing a "going" is done via the roster leave endpoint instead.
+router.delete("/:id/rsvp/:userId", async (req: Request, res: Response) => {
+  const eventId = req.params.id;
+  const { userId } = req.params;
+  try {
+    const event = await Event.findById(eventId);
+    if (!event) {
+      return res.status(404).json({ message: "Event not found" });
+    }
+    event.rsvps = event.rsvps.filter((r: any) => r.userId !== userId);
+    await event.save();
+
+    socketService.emitToEvent(eventId, "roster:updated", {
+      eventId,
+      roster: event.roster,
+      rosterSpotsFilled: event.rosterSpotsFilled,
+      rsvps: event.rsvps,
+      spotReservation: event.spotReservation,
+    });
+    broadcastRosterChanged(event);
+    socketService.emitToAll("events:refresh", { reason: "rsvp_clear", eventId });
+
+    return res.status(200).json({ success: true, rsvps: event.rsvps });
+  } catch (error) {
+    console.error("Error clearing RSVP:", error);
+    return res.status(500).json({ message: "Error clearing RSVP" });
+  }
+});
+
+// Request to join a public (gated) event. The creator is notified and
+// approves/denies. Only public events use requests — private events aren't
+// visible and invite-only events are joined by invitation.
+router.post("/:id/join-request", async (req: Request, res: Response) => {
+  const currentUser = (req as any).user;
+  if (!currentUser?.id) {
+    return res.status(401).json({ message: "Authentication required" });
+  }
+  const userId = String(currentUser.id);
+  const { username, profilePicUrl } = req.body;
+  try {
+    const event = await Event.findById(req.params.id);
+    if (!event) {
+      return res.status(404).json({ message: "Event not found" });
+    }
+    if ((event.privacy || "public") !== "public") {
+      return res
+        .status(400)
+        .json({ message: "Only public events accept join requests" });
+    }
+    if (String(event.createdBy) === userId) {
+      return res.status(400).json({ message: "You own this event" });
+    }
+    if (event.roster.some((p: any) => String(p.userId) === userId)) {
+      return res.status(409).json({ message: "You're already on the roster" });
+    }
+    const alreadyRequested = event.joinRequests.some(
+      (r: any) => String(r.userId) === userId,
+    );
+    if (!alreadyRequested) {
+      event.joinRequests.push({
+        userId,
+        username: username || "",
+        profilePicUrl,
+        requestedAt: new Date(),
+      } as any);
+      await event.save();
+
+      notificationService.sendPushNotification({
+        userId: String(event.createdBy),
+        title: "New join request",
+        body: `${username || "Someone"} asked to join "${event.name}"`,
+        type: "event_join_request",
+        data: { eventId: event._id.toString(), eventName: event.name },
+      });
+      // Nudge the creator's client to refetch so the pending list updates.
+      socketService.emitToUser(String(event.createdBy), "events:refresh", {
+        reason: "join_request",
+        eventId: event._id.toString(),
+      });
+    }
+
+    return res
+      .status(200)
+      .json({ success: true, myJoinRequestStatus: "pending" });
+  } catch (error) {
+    console.error("Error creating join request:", error);
+    return res.status(500).json({ message: "Error creating join request" });
+  }
+});
+
+// Approve a pending join request (creator only). Adds the requester to the
+// roster — which is what unlocks the event's full details for them.
+router.post(
+  "/:id/join-request/:userId/approve",
+  async (req: Request, res: Response) => {
+    const currentUser = (req as any).user;
+    if (!currentUser?.id) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+    try {
+      const event = await Event.findById(req.params.id);
+      if (!event) {
+        return res.status(404).json({ message: "Event not found" });
+      }
+      if (String(event.createdBy) !== String(currentUser.id)) {
+        return res
+          .status(403)
+          .json({ message: "Only the event creator can approve requests" });
+      }
+      const requesterId = String(req.params.userId);
+      const request = event.joinRequests.find(
+        (r: any) => String(r.userId) === requesterId,
+      );
+      if (!request) {
+        return res.status(404).json({ message: "Join request not found" });
+      }
+      if (event.roster.length >= event.totalSpots) {
+        return res.status(400).json({ message: "Event is full", full: true });
+      }
+
+      event.roster.push({
+        username: request.username,
+        paidStatus: "Unpaid",
+        userId: requesterId,
+        profilePicUrl: request.profilePicUrl,
+      } as any);
+      event.rosterSpotsFilled = event.roster.length;
+      event.joinRequests = event.joinRequests.filter(
+        (r: any) => String(r.userId) !== requesterId,
+      );
+      await event.save();
+
+      notificationService.sendPushNotification({
+        userId: requesterId,
+        title: "Request approved 🎉",
+        body: `You're in for "${event.name}"`,
+        type: "event_join_approved",
+        data: { eventId: event._id.toString(), eventName: event.name },
+      });
+
+      broadcastRosterChanged(event);
+      // Requester's card must refetch to unlock the full (ungated) details;
+      // creator's refetches to drop the request from the pending list.
+      socketService.emitToUser(requesterId, "events:refresh", {
+        reason: "join_approved",
+        eventId: event._id.toString(),
+      });
+      socketService.emitToUser(String(event.createdBy), "events:refresh", {
+        reason: "join_approved",
+        eventId: event._id.toString(),
+      });
+
+      return res.status(200).json({
+        success: true,
+        roster: event.roster,
+        joinRequests: event.joinRequests,
+        rosterSpotsFilled: event.rosterSpotsFilled,
+      });
+    } catch (error) {
+      console.error("Error approving join request:", error);
+      return res.status(500).json({ message: "Error approving join request" });
+    }
+  },
+);
+
+// Deny a pending join request (creator only).
+router.post(
+  "/:id/join-request/:userId/deny",
+  async (req: Request, res: Response) => {
+    const currentUser = (req as any).user;
+    if (!currentUser?.id) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+    try {
+      const event = await Event.findById(req.params.id);
+      if (!event) {
+        return res.status(404).json({ message: "Event not found" });
+      }
+      if (String(event.createdBy) !== String(currentUser.id)) {
+        return res
+          .status(403)
+          .json({ message: "Only the event creator can deny requests" });
+      }
+      const requesterId = String(req.params.userId);
+      const existed = event.joinRequests.some(
+        (r: any) => String(r.userId) === requesterId,
+      );
+      event.joinRequests = event.joinRequests.filter(
+        (r: any) => String(r.userId) !== requesterId,
+      );
+      await event.save();
+
+      if (existed) {
+        notificationService.sendPushNotification({
+          userId: requesterId,
+          title: "Request update",
+          body: `Your request to join "${event.name}" wasn't approved`,
+          type: "event_join_denied",
+          data: { eventId: event._id.toString(), eventName: event.name },
+        });
+        socketService.emitToUser(requesterId, "events:refresh", {
+          reason: "join_denied",
+          eventId: event._id.toString(),
+        });
+        socketService.emitToUser(String(event.createdBy), "events:refresh", {
+          reason: "join_denied",
+          eventId: event._id.toString(),
+        });
+      }
+
+      return res
+        .status(200)
+        .json({ success: true, joinRequests: event.joinRequests });
+    } catch (error) {
+      console.error("Error denying join request:", error);
+      return res.status(500).json({ message: "Error denying join request" });
     }
   },
 );

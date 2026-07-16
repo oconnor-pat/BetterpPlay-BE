@@ -57,6 +57,53 @@ const SpotReservationSchema: Schema = new Schema(
   { _id: false },
 );
 
+// RSVP responses that are NOT "going". "Going" is represented by presence on
+// the roster (which owns spot counts, jersey, paid status), so this array
+// only holds the "maybe" and "can't make it" replies. A user is in exactly
+// one place: on the roster (going) OR here (maybe/cant) OR neither (no reply).
+export type RsvpStatus = "maybe" | "cant";
+
+export interface IRsvp {
+  userId: string;
+  username: string;
+  profilePicUrl?: string;
+  status: RsvpStatus;
+  respondedAt: Date;
+}
+
+const RsvpSchema: Schema = new Schema(
+  {
+    userId: { type: String, required: true },
+    username: { type: String, required: true },
+    profilePicUrl: { type: String, required: false },
+    status: { type: String, enum: ["maybe", "cant"], required: true },
+    respondedAt: { type: Date, default: Date.now },
+  },
+  { _id: false },
+);
+
+// Pending requests to join a public event. Public events are gated: the
+// creator approves requests, and only approval (which adds the user to the
+// roster) unlocks the event's full details. Holds pending requests only —
+// approving removes the entry and adds the user to the roster; denying just
+// removes it.
+export interface IJoinRequest {
+  userId: string;
+  username: string;
+  profilePicUrl?: string;
+  requestedAt: Date;
+}
+
+const JoinRequestSchema: Schema = new Schema(
+  {
+    userId: { type: String, required: true },
+    username: { type: String, required: true },
+    profilePicUrl: { type: String, required: false },
+    requestedAt: { type: Date, default: Date.now },
+  },
+  { _id: false },
+);
+
 export interface IEvent extends Document {
   name: string;
   location: string;
@@ -69,6 +116,8 @@ export interface IEvent extends Document {
   createdByUsername?: string;
   roster: IParticipant[];
   waitlist: IWaitlistEntry[];
+  rsvps: IRsvp[];
+  joinRequests: IJoinRequest[];
   spotReservation?: ISpotReservation | null;
   latitude?: number;
   longitude?: number;
@@ -116,6 +165,8 @@ const EventSchema: Schema = new Schema(
     createdByUsername: { type: String }, // <-- Added field
     roster: { type: [ParticipantSchema], default: [] },
     waitlist: { type: [WaitlistEntrySchema], default: [] },
+    rsvps: { type: [RsvpSchema], default: [] },
+    joinRequests: { type: [JoinRequestSchema], default: [] },
     spotReservation: { type: SpotReservationSchema, default: null },
     latitude: { type: Number, required: false },
     longitude: { type: Number, required: false },

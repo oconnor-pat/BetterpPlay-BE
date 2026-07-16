@@ -15,6 +15,10 @@ export interface INotification extends Document {
     | "event_comment"
     | "event_join"
     | "event_leave"
+    | "event_rsvp"
+    | "event_join_request"
+    | "event_join_approved"
+    | "event_join_denied"
     | "event_spot_available"
     | "event_waitlist_join"
     | "community_note"
@@ -58,6 +62,10 @@ const NotificationSchema: Schema = new Schema(
         "event_comment",
         "event_join",
         "event_leave",
+        "event_rsvp",
+        "event_join_request",
+        "event_join_approved",
+        "event_join_denied",
         "event_spot_available",
         "event_waitlist_join",
         "community_note",

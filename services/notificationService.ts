@@ -131,6 +131,10 @@ export type NotificationType =
   | "event_comment"
   | "event_join"
   | "event_leave"
+  | "event_rsvp"
+  | "event_join_request"
+  | "event_join_approved"
+  | "event_join_denied"
   | "event_spot_available"
   | "event_waitlist_join"
   | "community_note"
@@ -196,6 +200,10 @@ export const sendPushNotification = async (
         case "event_comment":
         case "event_join":
         case "event_leave":
+        case "event_rsvp":
+        case "event_join_request":
+        case "event_join_approved":
+        case "event_join_denied":
           if (!preferences.eventActivity) return false;
           break;
         case "community_note":
