@@ -352,6 +352,8 @@ router.post("/", async (req: Request, res: Response) => {
       jerseyColors,
       privacy,
       invitedUsers,
+      allowJoinRequests,
+      showLocationPublicly,
       isRecurring,
       recurrenceFrequency,
       recurrenceCount,
@@ -535,6 +537,8 @@ router.post("/", async (req: Request, res: Response) => {
       jerseyColors: jerseyColors || [],
       privacy: eventPrivacy,
       invitedUsers: mergedInvitedUsers,
+      allowJoinRequests: allowJoinRequests !== false,
+      showLocationPublicly: showLocationPublicly === true,
       // Optional venue listing reference (set when a user planned this event
       // from the Venues tab via "Plan event from this page").
       venueId: venueId || undefined,
@@ -713,6 +717,8 @@ router.put("/:id", async (req: Request, res: Response) => {
       jerseyColors,
       privacy,
       invitedUsers,
+      allowJoinRequests,
+      showLocationPublicly,
       isRecurring,
       recurrenceFrequency,
       recurrenceCount,
@@ -743,6 +749,10 @@ router.put("/:id", async (req: Request, res: Response) => {
     if (latitude !== undefined) event.latitude = latitude;
     if (longitude !== undefined) event.longitude = longitude;
     if (jerseyColors !== undefined) event.jerseyColors = jerseyColors;
+    if (allowJoinRequests !== undefined)
+      event.allowJoinRequests = allowJoinRequests !== false;
+    if (showLocationPublicly !== undefined)
+      event.showLocationPublicly = showLocationPublicly === true;
 
     if (privacy !== undefined) {
       const validPrivacy = ["public", "private", "invite-only"];
@@ -836,6 +846,8 @@ router.put("/:id", async (req: Request, res: Response) => {
       jerseyColors: event.jerseyColors || [],
       privacy: event.privacy,
       invitedUsers: event.invitedUsers || [],
+      allowJoinRequests: event.allowJoinRequests,
+      showLocationPublicly: event.showLocationPublicly,
       isRecurring: true,
       recurrenceGroupId: groupId,
       recurrenceFrequency: event.recurrenceFrequency,
@@ -932,6 +944,8 @@ router.put("/:id", async (req: Request, res: Response) => {
           t.eventType = event.eventType;
           t.createdByUsername = event.createdByUsername;
           t.privacy = event.privacy;
+          t.allowJoinRequests = event.allowJoinRequests;
+          t.showLocationPublicly = event.showLocationPublicly;
           t.jerseyColors = event.jerseyColors || [];
           t.latitude = event.latitude;
           t.longitude = event.longitude;
@@ -1324,7 +1338,7 @@ function projectEventForViewer(event: any, viewerId: string | null): any {
       (event.joinRequests || []).some(
         (r: any) => String(r.userId) === String(viewerId),
       );
-    return {
+    const teaser: any = {
       _id: event._id,
       name: event.name,
       eventType: event.eventType,
@@ -1336,6 +1350,10 @@ function projectEventForViewer(event: any, viewerId: string | null): any {
       createdBy: event.createdBy,
       createdByUsername: event.createdByUsername,
       privacy,
+      // Creator controls surfaced on the teaser so the card can render the
+      // right join affordance / location visibility without full access.
+      allowJoinRequests: event.allowJoinRequests !== false,
+      showLocationPublicly: event.showLocationPublicly === true,
       isRecurring: event.isRecurring,
       recurrenceGroupId: event.recurrenceGroupId,
       recurrenceFrequency: event.recurrenceFrequency,
@@ -1348,6 +1366,14 @@ function projectEventForViewer(event: any, viewerId: string | null): any {
       waitlist: [],
       joinRequests: [],
     };
+    // Optionally reveal the location/map on the public teaser if the creator
+    // opted in; everything else stays hidden until approval.
+    if (event.showLocationPublicly === true) {
+      teaser.location = event.location;
+      teaser.latitude = event.latitude;
+      teaser.longitude = event.longitude;
+    }
+    return teaser;
   }
 
   const full: any = { ...event, isGated: false, myJoinRequestStatus: "none" };
@@ -1662,6 +1688,11 @@ router.post("/:id/join-request", async (req: Request, res: Response) => {
       return res
         .status(400)
         .json({ message: "Only public events accept join requests" });
+    }
+    if (event.allowJoinRequests === false) {
+      return res
+        .status(403)
+        .json({ message: "This event is not accepting join requests" });
     }
     if (String(event.createdBy) === userId) {
       return res.status(400).json({ message: "You own this event" });

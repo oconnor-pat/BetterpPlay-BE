@@ -125,6 +125,13 @@ export interface IEvent extends Document {
   likes: string[];
   privacy: "public" | "private" | "invite-only";
   invitedUsers: string[];
+  // Public-event creator controls. `allowJoinRequests` (default true) gates
+  // whether people can request to join a public event; when false the card
+  // shows "not accepting requests". `showLocationPublicly` (default false)
+  // lets the creator reveal the location/map on the public teaser instead of
+  // keeping it hidden until approval.
+  allowJoinRequests?: boolean;
+  showLocationPublicly?: boolean;
   isRecurring?: boolean;
   recurrenceGroupId?: string;
   recurrenceFrequency?: "weekly" | "biweekly" | "monthly";
@@ -178,6 +185,8 @@ const EventSchema: Schema = new Schema(
       default: "public",
     }, // Event visibility
     invitedUsers: { type: [String], default: [] }, // Array of userIds invited
+    allowJoinRequests: { type: Boolean, default: true },
+    showLocationPublicly: { type: Boolean, default: false },
     isRecurring: { type: Boolean, default: false },
     recurrenceGroupId: { type: String, default: null },
     recurrenceFrequency: {
