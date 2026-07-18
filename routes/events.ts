@@ -10,6 +10,38 @@ import socketService from "../services/socketService";
 
 const router = Router();
 
+// Normalize any incoming date to the canonical "YYYY-MM-DD" storage format.
+// The client's date picker sends `Date.toDateString()` ("Fri Jul 24 2026"),
+// but recurring series are stored as ISO calendar dates at creation. Editing
+// must land in the same format or the series sorts/groups inconsistently on
+// the client. Already-ISO input is passed through untouched (avoids any
+// UTC-parse day shift); other formats are converted via the same path used
+// when a series is first generated.
+const toIsoDate = (input: string): string => {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(input)) return input;
+  const d = new Date(input);
+  return isNaN(d.getTime()) ? input : d.toISOString().split("T")[0];
+};
+
+// Shift a stored "YYYY-MM-DD" date by `steps` recurrence intervals (steps may
+// be negative). Mirrors the arithmetic used when a recurring series is first
+// generated so re-sequencing an edited series stays perfectly in step.
+const shiftRecurrenceDate = (
+  anchorDate: string,
+  frequency: "weekly" | "biweekly" | "monthly",
+  steps: number,
+): string => {
+  const d = new Date(anchorDate);
+  if (frequency === "weekly") {
+    d.setDate(d.getDate() + steps * 7);
+  } else if (frequency === "biweekly") {
+    d.setDate(d.getDate() + steps * 14);
+  } else if (frequency === "monthly") {
+    d.setMonth(d.getMonth() + steps);
+  }
+  return d.toISOString().split("T")[0];
+};
+
 // Drop a system message into a group's chat when an event is scheduled
 // from that group, so the conversation and the plans it produces live in
 // one thread. Best-effort: chat is a nicety, never block event creation
@@ -681,6 +713,9 @@ router.put("/:id", async (req: Request, res: Response) => {
       jerseyColors,
       privacy,
       invitedUsers,
+      isRecurring,
+      recurrenceFrequency,
+      recurrenceCount,
     } = req.body;
 
     const event = await Event.findById(eventId);
@@ -700,7 +735,7 @@ router.put("/:id", async (req: Request, res: Response) => {
     event.name = name || event.name;
     event.location = location || event.location;
     event.time = time || event.time;
-    event.date = date || event.date;
+    event.date = date ? toIsoDate(date) : event.date;
     event.totalSpots = totalSpots || event.totalSpots;
     event.eventType = eventType || event.eventType;
     event.createdByUsername = createdByUsername || event.createdByUsername;
@@ -771,6 +806,222 @@ router.put("/:id", async (req: Request, res: Response) => {
       }
     }
 
+    // ── Recurrence editing ──────────────────────────────────────────────
+    // Reconcile the series to match the recurrence the editor asked for. The
+    // client sends `isRecurring` (+ frequency/count) only when it surfaced the
+    // recurrence controls, so a missing value means "leave recurrence alone"
+    // and we fall back to the legacy date-only re-sequence below. `count` is
+    // the number of occurrences from the edited event *forward* (inclusive).
+    let seriesChanged = false;
+    const recurrenceIntentProvided = typeof isRecurring === "boolean";
+    const wasRecurring = !!(event.isRecurring && event.recurrenceGroupId);
+    const editedId = event._id.toString();
+
+    const buildOccurrence = (occurrenceDate: string, groupId: string) => ({
+      name: event.name,
+      location: event.location,
+      time: event.time,
+      date: occurrenceDate,
+      totalSpots: event.totalSpots,
+      rosterSpotsFilled: 0,
+      eventType: event.eventType,
+      createdBy: event.createdBy,
+      createdByUsername: event.createdByUsername,
+      roster: [],
+      waitlist: [],
+      rsvps: [],
+      joinRequests: [],
+      latitude: event.latitude,
+      longitude: event.longitude,
+      jerseyColors: event.jerseyColors || [],
+      privacy: event.privacy,
+      invitedUsers: event.invitedUsers || [],
+      isRecurring: true,
+      recurrenceGroupId: groupId,
+      recurrenceFrequency: event.recurrenceFrequency,
+      venueId: event.venueId,
+      venueName: event.venueName,
+      groupId: event.groupId,
+      groupName: event.groupName,
+      sourceUrl: event.sourceUrl,
+    });
+
+    if (recurrenceIntentProvided) {
+      const frequency = (recurrenceFrequency ||
+        event.recurrenceFrequency ||
+        "weekly") as "weekly" | "biweekly" | "monthly";
+      // Allow 1 so re-saving the last occurrence of a series (forward count of
+      // 1) is a no-op rather than silently adding a new occurrence. Single →
+      // recurring enforces a floor of 2 separately below.
+      const targetCount = Math.min(
+        Math.max(parseInt(String(recurrenceCount ?? 1), 10) || 1, 1),
+        12,
+      );
+
+      if (!isRecurring && wasRecurring) {
+        // Recurring → single: keep only the edited occurrence, delete the rest
+        // of the series (regardless of date) so a lone standalone event remains.
+        await Event.deleteMany({
+          recurrenceGroupId: event.recurrenceGroupId,
+          _id: { $ne: event._id },
+        });
+        event.isRecurring = false;
+        event.recurrenceGroupId = null as any;
+        event.recurrenceFrequency = null as any;
+        await event.save();
+        seriesChanged = true;
+      } else if (isRecurring && !wasRecurring) {
+        // Single → recurring: this event becomes occurrence #1 and anchors a
+        // brand-new series; generate the remaining occurrences from its date.
+        const newGroupId = new mongoose.Types.ObjectId().toString();
+        event.isRecurring = true;
+        event.recurrenceGroupId = newGroupId;
+        event.recurrenceFrequency = frequency;
+        await event.save();
+        const seriesCount = Math.max(targetCount, 2);
+        const toCreate = [];
+        for (let k = 1; k < seriesCount; k++) {
+          toCreate.push(
+            buildOccurrence(
+              shiftRecurrenceDate(event.date, frequency, k),
+              newGroupId,
+            ),
+          );
+        }
+        if (toCreate.length > 0) {
+          await Event.insertMany(toCreate);
+        }
+        seriesChanged = true;
+      } else if (isRecurring && wasRecurring) {
+        // Still recurring: re-shape the series. Dates are re-sequenced from the
+        // edited occurrence forward (earlier/already-happened occurrences keep
+        // their dates), while the shared "identity" fields (name, location,
+        // time, spots, etc.) propagate to the *whole* series so every
+        // occurrence stays the same event. Reused occurrences keep their
+        // roster/RSVPs; extras are created empty and any surplus tail removed.
+        event.recurrenceFrequency = frequency;
+        await event.save();
+
+        const series = await Event.find({
+          recurrenceGroupId: event.recurrenceGroupId,
+        });
+        const ordered = series
+          .map((e) => ({
+            e,
+            sortDate:
+              e._id.toString() === editedId ? String(oldValues.date) : e.date,
+          }))
+          .sort((a, b) =>
+            a.sortDate < b.sortDate ? -1 : a.sortDate > b.sortDate ? 1 : 0,
+          );
+        const editedIndex = ordered.findIndex(
+          (o) => o.e._id.toString() === editedId,
+        );
+        const before = ordered.slice(0, editedIndex).map((o) => o.e);
+        const forward = ordered.slice(editedIndex).map((o) => o.e);
+        const groupId = String(event.recurrenceGroupId);
+        const ops: Promise<any>[] = [];
+
+        // Copy the edited occurrence's shared fields onto a sibling. Dates,
+        // roster/RSVPs and recurrence bookkeeping are handled separately.
+        const applySharedFields = (t: any) => {
+          t.name = event.name;
+          t.location = event.location;
+          t.time = event.time;
+          t.totalSpots = event.totalSpots;
+          t.eventType = event.eventType;
+          t.createdByUsername = event.createdByUsername;
+          t.privacy = event.privacy;
+          t.jerseyColors = event.jerseyColors || [];
+          t.latitude = event.latitude;
+          t.longitude = event.longitude;
+          t.invitedUsers = event.invitedUsers || [];
+          t.venueId = event.venueId;
+          t.venueName = event.venueName;
+          t.groupId = event.groupId;
+          t.groupName = event.groupName;
+          t.sourceUrl = event.sourceUrl;
+        };
+
+        // Earlier occurrences: keep their dates, sync shared fields only.
+        for (const e of before) {
+          applySharedFields(e);
+          ops.push(e.save());
+        }
+
+        for (let k = 0; k < targetCount; k++) {
+          const occurrenceDate = shiftRecurrenceDate(event.date, frequency, k);
+          const existing = forward[k];
+          if (existing) {
+            // forward[0] is the edited event itself — already saved with the
+            // new fields, so only sync the rest.
+            if (existing._id.toString() !== editedId) {
+              applySharedFields(existing);
+            }
+            existing.date = occurrenceDate;
+            existing.recurrenceFrequency = frequency;
+            existing.isRecurring = true;
+            ops.push(existing.save());
+          } else {
+            ops.push(
+              Event.create(buildOccurrence(occurrenceDate, groupId)) as any,
+            );
+          }
+        }
+        // Remove surplus occurrences beyond the new count.
+        for (let k = targetCount; k < forward.length; k++) {
+          ops.push(Event.deleteOne({ _id: forward[k]._id }) as any);
+        }
+        await Promise.all(ops);
+        seriesChanged = true;
+      }
+    } else if (
+      changedFields.includes("date") &&
+      event.isRecurring &&
+      event.recurrenceGroupId &&
+      event.recurrenceFrequency
+    ) {
+      // Legacy path (client didn't send recurrence intent): just slide the
+      // edited occurrence and everything after it so the series stays evenly
+      // spaced. Earlier/past occurrences are left untouched.
+      const series = await Event.find({
+        recurrenceGroupId: event.recurrenceGroupId,
+      });
+      if (series.length > 1) {
+        const ordered = series
+          .map((e) => ({
+            e,
+            sortDate:
+              e._id.toString() === editedId ? String(oldValues.date) : e.date,
+          }))
+          .sort((a, b) =>
+            a.sortDate < b.sortDate ? -1 : a.sortDate > b.sortDate ? 1 : 0,
+          );
+        const editedIndex = ordered.findIndex(
+          (o) => o.e._id.toString() === editedId,
+        );
+        const anchor = event.date;
+        const frequency = event.recurrenceFrequency as
+          | "weekly"
+          | "biweekly"
+          | "monthly";
+        const saves: Promise<any>[] = [];
+        for (let j = editedIndex; j < ordered.length; j++) {
+          const target = ordered[j].e;
+          if (target._id.toString() === editedId) continue;
+          const nextDate = shiftRecurrenceDate(anchor, frequency, j - editedIndex);
+          if (target.date !== nextDate) {
+            target.date = nextDate;
+            saves.push(target.save());
+          }
+        }
+        if (saves.length > 0) {
+          await Promise.all(saves);
+          seriesChanged = true;
+        }
+      }
+    }
+
     if (event.roster && event.roster.length > 0) {
       const participantUserIds = event.roster
         .filter((p: any) => p.userId)
@@ -796,7 +1047,11 @@ router.put("/:id", async (req: Request, res: Response) => {
       }
     }
 
-    socketService.emitToAll("events:refresh", { reason: "updated", eventId: event._id.toString() });
+    socketService.emitToAll("events:refresh", {
+      reason: seriesChanged ? "series-changed" : "updated",
+      eventId: event._id.toString(),
+      recurrenceGroupId: seriesChanged ? event.recurrenceGroupId : undefined,
+    });
     socketService.emitToEvent(event._id.toString(), "event:updated", { event });
 
     res.status(200).json(event);
