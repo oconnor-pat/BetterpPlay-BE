@@ -108,6 +108,12 @@ export interface IEvent extends Document {
   name: string;
   location: string;
   time: string;
+  // How long the event runs, in minutes. Stored as a duration rather than an
+  // end-time string because `time` is free-form ("6:30 PM", "18:30", "10:31PM")
+  // and deriving an end from it would inherit that ambiguity. Optional: events
+  // created before this existed have no known duration, so clients must treat
+  // it as unknown rather than assuming a default.
+  durationMinutes?: number;
   date: string;
   totalSpots: number;
   rosterSpotsFilled: number;
@@ -164,6 +170,7 @@ const EventSchema: Schema = new Schema(
     name: { type: String, required: true },
     location: { type: String, required: true },
     time: { type: String, required: true },
+    durationMinutes: { type: Number, min: 5, max: 24 * 60 },
     date: { type: String, required: true },
     totalSpots: { type: Number, required: true },
     rosterSpotsFilled: { type: Number, default: 0 },

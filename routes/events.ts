@@ -23,6 +23,19 @@ const toIsoDate = (input: string): string => {
   return isNaN(d.getTime()) ? input : d.toISOString().split("T")[0];
 };
 
+// Coerce an incoming event duration into a sane number of minutes, or undefined
+// when the client didn't send one (meaning "duration unknown" — clients render
+// only a start time in that case). Bounds mirror the schema so a bad value is
+// dropped rather than failing the whole save.
+const normalizeDuration = (input: unknown): number | undefined => {
+  if (input === undefined || input === null || input === "") return undefined;
+  const minutes = Math.round(Number(input));
+  if (!Number.isFinite(minutes) || minutes < 5 || minutes > 24 * 60) {
+    return undefined;
+  }
+  return minutes;
+};
+
 // Shift a stored "YYYY-MM-DD" date by `steps` recurrence intervals (steps may
 // be negative). Mirrors the arithmetic used when a recurring series is first
 // generated so re-sequencing an edited series stays perfectly in step.
@@ -342,6 +355,7 @@ router.post("/", async (req: Request, res: Response) => {
       name,
       location,
       time,
+      durationMinutes,
       date,
       totalSpots,
       eventType,
@@ -526,6 +540,7 @@ router.post("/", async (req: Request, res: Response) => {
       name,
       location,
       time,
+      durationMinutes: normalizeDuration(durationMinutes),
       totalSpots,
       eventType,
       createdBy,
@@ -708,6 +723,7 @@ router.put("/:id", async (req: Request, res: Response) => {
       name,
       location,
       time,
+      durationMinutes,
       date,
       totalSpots,
       eventType,
@@ -733,6 +749,7 @@ router.put("/:id", async (req: Request, res: Response) => {
       name: event.name,
       date: event.date,
       time: event.time,
+      durationMinutes: event.durationMinutes,
       location: event.location,
       totalSpots: event.totalSpots,
       eventType: event.eventType,
@@ -741,6 +758,10 @@ router.put("/:id", async (req: Request, res: Response) => {
     event.name = name || event.name;
     event.location = location || event.location;
     event.time = time || event.time;
+    // Sent explicitly as null to clear a previously set duration.
+    if (durationMinutes !== undefined) {
+      event.durationMinutes = normalizeDuration(durationMinutes);
+    }
     event.date = date ? toIsoDate(date) : event.date;
     event.totalSpots = totalSpots || event.totalSpots;
     event.eventType = eventType || event.eventType;
@@ -791,6 +812,7 @@ router.put("/:id", async (req: Request, res: Response) => {
       name: event.name,
       date: event.date,
       time: event.time,
+      durationMinutes: event.durationMinutes,
       location: event.location,
       totalSpots: event.totalSpots,
       eventType: event.eventType,
@@ -800,6 +822,7 @@ router.put("/:id", async (req: Request, res: Response) => {
       name: "name",
       date: "date",
       time: "time",
+      durationMinutes: "duration",
       location: "location",
       totalSpots: "total spots",
       eventType: "activity type",
@@ -831,6 +854,7 @@ router.put("/:id", async (req: Request, res: Response) => {
       name: event.name,
       location: event.location,
       time: event.time,
+      durationMinutes: event.durationMinutes,
       date: occurrenceDate,
       totalSpots: event.totalSpots,
       rosterSpotsFilled: 0,
@@ -940,6 +964,7 @@ router.put("/:id", async (req: Request, res: Response) => {
           t.name = event.name;
           t.location = event.location;
           t.time = event.time;
+          t.durationMinutes = event.durationMinutes;
           t.totalSpots = event.totalSpots;
           t.eventType = event.eventType;
           t.createdByUsername = event.createdByUsername;
@@ -1344,6 +1369,7 @@ function projectEventForViewer(event: any, viewerId: string | null): any {
       eventType: event.eventType,
       date: event.date,
       time: event.time,
+      durationMinutes: event.durationMinutes,
       totalSpots: event.totalSpots,
       rosterSpotsFilled:
         event.rosterSpotsFilled ?? (event.roster || []).length,
