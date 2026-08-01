@@ -10,6 +10,9 @@ import socketService from "../services/socketService";
 
 const router = Router();
 
+// The reaction a legacy "like" maps to, in both directions.
+const LIKE_EMOJI = "❤️";
+
 // Normalize any incoming date to the canonical "YYYY-MM-DD" storage format.
 // The client's date picker sends `Date.toDateString()` ("Fri Jul 24 2026"),
 // but recurring series are stored as ISO calendar dates at creation. Editing
@@ -1385,6 +1388,7 @@ function projectEventForViewer(event: any, viewerId: string | null): any {
       recurrenceFrequency: event.recurrenceFrequency,
       createdAt: event.createdAt,
       likes: event.likes || [],
+      reactions: event.reactions || [],
       isGated: true,
       myJoinRequestStatus: pending ? "pending" : "none",
       roster: [],
@@ -2109,77 +2113,187 @@ router.delete(
   },
 );
 
+// Ceilings borrowed from Discord's own limits, to stop a single event
+// accumulating an unbounded reaction row.
+const MAX_DISTINCT_REACTIONS_PER_EVENT = 20;
+const MAX_REACTIONS_PER_USER_PER_EVENT = 20;
+
+// Any emoji is allowed (the client ships a full picker), so this can't be a
+// whitelist check. Instead: reject anything with ASCII letters and require at
+// least one non-ASCII code point, which keeps arbitrary text out of a field
+// clients render verbatim. The length cap is by code point because ZWJ
+// sequences, skin-tone modifiers and flags legitimately run several deep.
+const isValidEmoji = (value: unknown): value is string => {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const trimmed = value.trim();
+  if (!trimmed || Array.from(trimmed).length > 16) {
+    return false;
+  }
+  if (/[a-zA-Z]/.test(trimmed)) {
+    return false;
+  }
+  return /[^\x00-\x7F]/.test(trimmed);
+};
+
+// Add or remove one (user, emoji) pair. Unlike a single-choice reaction, a
+// user may hold several different emoji at once — only the exact pair toggles.
+// Returns true when the reaction was added. `likes` is rewritten from the "❤️"
+// reactions each time so it stays a faithful mirror for clients released
+// before reactions existed.
+const toggleUserReaction = (
+  event: any,
+  userId: string,
+  emoji: string,
+): boolean => {
+  const reactions = [...(event.reactions || [])];
+  const index = reactions.findIndex(
+    (r: any) => String(r.userId) === String(userId) && r.emoji === emoji,
+  );
+
+  let added: boolean;
+  if (index >= 0) {
+    reactions.splice(index, 1);
+    added = false;
+  } else {
+    reactions.push({ userId: String(userId), emoji, reactedAt: new Date() });
+    added = true;
+  }
+
+  event.reactions = reactions;
+  event.likes = reactions
+    .filter((r: any) => r.emoji === LIKE_EMOJI)
+    .map((r: any) => String(r.userId));
+  return added;
+};
+
+// Shared handler behind both POST /:eventId/react and the legacy
+// POST /:eventId/like. Tapping an emoji you've already used removes just that
+// one; any other emoji is added alongside what you already have.
+const handleReactionToggle = async (
+  req: Request,
+  res: Response,
+  requestedEmoji: unknown,
+) => {
+  let userId = req.body.userId;
+  if (!userId) {
+    const user = (req as any).user;
+    if (user && user.id) {
+      userId = user.id;
+    }
+  }
+
+  if (!userId) {
+    return res.status(400).json({ message: "Missing userId." });
+  }
+
+  if (!isValidEmoji(requestedEmoji)) {
+    return res.status(400).json({ message: "Invalid reaction." });
+  }
+  const emoji = requestedEmoji.trim();
+
+  const event = await Event.findById(req.params.eventId);
+  if (!event) {
+    return res.status(404).json({ message: "Event not found." });
+  }
+
+  const existing = (event as any).reactions || [];
+  const alreadyReacted = existing.some(
+    (r: any) => String(r.userId) === String(userId) && r.emoji === emoji,
+  );
+
+  // Only guard the growth direction — removing is always allowed, so a user
+  // can always undo their way back under a limit.
+  if (!alreadyReacted) {
+    const distinct = new Set(existing.map((r: any) => r.emoji));
+    if (!distinct.has(emoji) && distinct.size >= MAX_DISTINCT_REACTIONS_PER_EVENT) {
+      return res
+        .status(400)
+        .json({ message: "This event has too many different reactions." });
+    }
+    const mine = existing.filter(
+      (r: any) => String(r.userId) === String(userId),
+    );
+    if (mine.length >= MAX_REACTIONS_PER_USER_PER_EVENT) {
+      return res
+        .status(400)
+        .json({ message: "You've added too many reactions to this event." });
+    }
+  }
+
+  const added = toggleUserReaction(event, userId, emoji);
+  await event.save();
+
+  if (added && event.createdBy && String(event.createdBy) !== String(userId)) {
+    const reactor = await User.findById(userId).select("username");
+    if (reactor) {
+      notificationService.sendPushNotification({
+        userId: String(event.createdBy),
+        title: "Someone reacted to your event!",
+        body: `${reactor.username} reacted ${emoji} to "${event.name}"`,
+        type: "event_like",
+        data: { eventId: event._id.toString(), eventName: event.name },
+      });
+    }
+  }
+
+  const reactions = (event.reactions || []).map((r: any) => ({
+    userId: String(r.userId),
+    emoji: r.emoji,
+  }));
+
+  const likerIds = (event.likes || []).map((id: string) => {
+    try {
+      return new mongoose.Types.ObjectId(id);
+    } catch {
+      return id;
+    }
+  });
+  const likers = await User.find({ _id: { $in: likerIds } })
+    .select("username")
+    .lean();
+  const likedByUsernames = (event.likes || [])
+    .map((id: string) => {
+      const user = likers.find((u: any) => u._id.toString() === String(id));
+      return user?.username;
+    })
+    .filter((name: string | undefined): name is string => !!name);
+
+  const payload = { reactions, likes: event.likes || [], likedByUsernames };
+  socketService.emitToAll("event:reacted", {
+    eventId: req.params.eventId,
+    ...payload,
+  });
+  // Clients older than the reactions release only listen for event:liked, so
+  // keep emitting it or their hearts would go stale until a refetch.
+  socketService.emitToAll("event:liked", {
+    eventId: req.params.eventId,
+    likes: event.likes || [],
+    likedByUsernames,
+  });
+
+  return res.status(200).json(payload);
+};
+
+router.post("/:eventId/react", async (req: Request, res: Response) => {
+  try {
+    return await handleReactionToggle(req, res, req.body.emoji);
+  } catch (error) {
+    console.error("Error toggling event reaction:", error);
+    return res
+      .status(500)
+      .json({ message: "Failed to toggle reaction on event." });
+  }
+});
+
+// Legacy endpoint: a like is a "❤️" reaction.
 router.post("/:eventId/like", async (req: Request, res: Response) => {
   try {
-    let userId = req.body.userId;
-    if (!userId) {
-      const user = (req as any).user;
-      if (user && user.id) {
-        userId = user.id;
-      }
-    }
-
-    if (!userId) {
-      return res.status(400).json({ message: "Missing userId." });
-    }
-
-    const event = await Event.findById(req.params.eventId);
-    if (!event) {
-      return res.status(404).json({ message: "Event not found." });
-    }
-
-    if (!event.likes) {
-      event.likes = [];
-    }
-
-    const likeIndex = event.likes.indexOf(userId);
-    if (likeIndex === -1) {
-      event.likes.push(userId);
-    } else {
-      event.likes.splice(likeIndex, 1);
-    }
-    await event.save();
-
-    if (likeIndex === -1 && event.createdBy && String(event.createdBy) !== String(userId)) {
-      const liker = await User.findById(userId).select("username");
-      if (liker) {
-        notificationService.sendPushNotification({
-          userId: String(event.createdBy),
-          title: "Someone liked your event!",
-          body: `${liker.username} liked "${event.name}"`,
-          type: "event_like",
-          data: { eventId: event._id.toString(), eventName: event.name },
-        });
-      }
-    }
-
-    const likerIds = event.likes.map((id: string) => {
-      try {
-        return new mongoose.Types.ObjectId(id);
-      } catch {
-        return id;
-      }
-    });
-    const likers = await User.find({ _id: { $in: likerIds } })
-      .select("username")
-      .lean();
-    const likedByUsernames = event.likes
-      .map((id: string) => {
-        const user = likers.find((u: any) => u._id.toString() === String(id));
-        return user?.username;
-      })
-      .filter((name: string | undefined): name is string => !!name);
-
-    const likePayload = { likes: event.likes, likedByUsernames };
-    socketService.emitToAll("event:liked", {
-      eventId: req.params.eventId,
-      ...likePayload,
-    });
-
-    res.status(200).json(likePayload);
+    return await handleReactionToggle(req, res, LIKE_EMOJI);
   } catch (error) {
     console.error("Error toggling event like:", error);
-    res.status(500).json({ message: "Failed to toggle like on event." });
+    return res.status(500).json({ message: "Failed to toggle like on event." });
   }
 });
 

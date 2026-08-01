@@ -104,6 +104,29 @@ const JoinRequestSchema: Schema = new Schema(
   { _id: false },
 );
 
+// Quick-access reactions shown before the user opens the full emoji picker.
+// This is a convenience shortlist, not a whitelist — any emoji is accepted.
+// "❤️" leads because it's what the old like button became, so migrated likes
+// keep their meaning.
+export const QUICK_REACTION_EMOJIS = ["❤️", "🔥", "🎉", "😂", "👀", "👍"];
+
+// A single user's reaction to an event. Discord-style: a user may hold several
+// different emoji on the same event, but only one row per (user, emoji) pair.
+export interface IReaction {
+  userId: string;
+  emoji: string;
+  reactedAt: Date;
+}
+
+const ReactionSchema: Schema = new Schema(
+  {
+    userId: { type: String, required: true },
+    emoji: { type: String, required: true },
+    reactedAt: { type: Date, default: Date.now },
+  },
+  { _id: false },
+);
+
 export interface IEvent extends Document {
   name: string;
   location: string;
@@ -128,7 +151,11 @@ export interface IEvent extends Document {
   latitude?: number;
   longitude?: number;
   jerseyColors?: string[];
+  // Superseded by `reactions` — a like is now a "❤️" reaction. Kept on the
+  // model so events written before the migration still read cleanly and so
+  // clients older than the reactions release keep working.
   likes: string[];
+  reactions: IReaction[];
   privacy: "public" | "private" | "invite-only";
   invitedUsers: string[];
   // Public-event creator controls. `allowJoinRequests` (default true) gates
@@ -185,7 +212,8 @@ const EventSchema: Schema = new Schema(
     latitude: { type: Number, required: false },
     longitude: { type: Number, required: false },
     jerseyColors: { type: [String], default: [] }, // Team colors (for sports events)
-    likes: { type: [String], default: [] }, // Array of userIds who liked
+    likes: { type: [String], default: [] }, // Deprecated: mirrors "❤️" reactions
+    reactions: { type: [ReactionSchema], default: [] },
     privacy: {
       type: String,
       enum: ["public", "private", "invite-only"],
