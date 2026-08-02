@@ -23,6 +23,10 @@ export interface INotificationPreferences extends Document {
   // bucket so the chattiest group stream can be muted independently of
   // the higher-signal add/role/event pings.
   groupMessages: boolean;
+  // Reactions on your own chat messages. Separate from groupMessages
+  // because it's the one group ping that's purely social — plenty of
+  // people want the messages but not a buzz per emoji.
+  groupReactions: boolean;
   pushEnabled: boolean;
   createdAt: Date;
   updatedAt: Date;
@@ -78,6 +82,10 @@ const NotificationPreferencesSchema: Schema = new Schema(
       default: true,
     },
     groupMessages: {
+      type: Boolean,
+      default: true,
+    },
+    groupReactions: {
       type: Boolean,
       default: true,
     },

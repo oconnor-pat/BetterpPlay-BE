@@ -143,6 +143,7 @@ export type NotificationType =
   | "group_admin_promoted"
   | "group_ownership_transferred"
   | "group_message"
+  | "group_reaction"
   | "general";
 
 interface SendNotificationOptions {
@@ -228,6 +229,9 @@ export const sendPushNotification = async (
           break;
         case "group_message":
           if (preferences.groupMessages === false) return false;
+          break;
+        case "group_reaction":
+          if (preferences.groupReactions === false) return false;
           break;
       }
     }

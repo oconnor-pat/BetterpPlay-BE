@@ -103,6 +103,7 @@ router.get(
             groupRoleChanged: preferences.groupRoleChanged,
             groupEvents: preferences.groupEvents,
             groupMessages: preferences.groupMessages,
+            groupReactions: preferences.groupReactions,
             pushEnabled: preferences.pushEnabled,
           },
         });
@@ -141,6 +142,7 @@ router.put(
         groupRoleChanged,
         groupEvents,
         groupMessages,
+        groupReactions,
         pushEnabled,
       } = req.body;
 
@@ -168,6 +170,8 @@ router.put(
       if (typeof groupEvents === "boolean") updates.groupEvents = groupEvents;
       if (typeof groupMessages === "boolean")
         updates.groupMessages = groupMessages;
+      if (typeof groupReactions === "boolean")
+        updates.groupReactions = groupReactions;
       if (typeof pushEnabled === "boolean") updates.pushEnabled = pushEnabled;
 
       const preferences =
@@ -192,6 +196,7 @@ router.put(
             groupRoleChanged: preferences.groupRoleChanged,
             groupEvents: preferences.groupEvents,
             groupMessages: preferences.groupMessages,
+            groupReactions: preferences.groupReactions,
             pushEnabled: preferences.pushEnabled,
           },
         });

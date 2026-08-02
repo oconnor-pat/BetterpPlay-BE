@@ -7,6 +7,7 @@ import GroupMessage from "../models/groupMessage";
 import communityNote from "../models/communityNote";
 import notificationService from "../services/notificationService";
 import socketService from "../services/socketService";
+import { isValidEmoji } from "../utils/emoji";
 
 const router = Router();
 
@@ -2117,25 +2118,6 @@ router.delete(
 // accumulating an unbounded reaction row.
 const MAX_DISTINCT_REACTIONS_PER_EVENT = 20;
 const MAX_REACTIONS_PER_USER_PER_EVENT = 20;
-
-// Any emoji is allowed (the client ships a full picker), so this can't be a
-// whitelist check. Instead: reject anything with ASCII letters and require at
-// least one non-ASCII code point, which keeps arbitrary text out of a field
-// clients render verbatim. The length cap is by code point because ZWJ
-// sequences, skin-tone modifiers and flags legitimately run several deep.
-const isValidEmoji = (value: unknown): value is string => {
-  if (typeof value !== "string") {
-    return false;
-  }
-  const trimmed = value.trim();
-  if (!trimmed || Array.from(trimmed).length > 16) {
-    return false;
-  }
-  if (/[a-zA-Z]/.test(trimmed)) {
-    return false;
-  }
-  return /[^\x00-\x7F]/.test(trimmed);
-};
 
 // Add or remove one (user, emoji) pair. Unlike a single-choice reaction, a
 // user may hold several different emoji at once — only the exact pair toggles.

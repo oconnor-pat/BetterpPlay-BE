@@ -7,6 +7,7 @@ import Event from "../models/event";
 import groupEventLink from "../services/groupEventLink";
 import notificationService from "../services/notificationService";
 import socketService from "../services/socketService";
+import { isValidEmoji } from "../utils/emoji";
 
 const router = Router();
 
@@ -185,6 +186,8 @@ router.get("/mine", async (req: Request, res: Response) => {
             kind: { $first: "$kind" },
             username: { $first: "$username" },
             senderId: { $first: "$userId" },
+            imageUrl: { $first: "$imageUrl" },
+            deletedAt: { $first: "$deletedAt" },
             createdAt: { $first: "$createdAt" },
           },
         },
@@ -229,15 +232,7 @@ router.get("/mine", async (req: Request, res: Response) => {
           createdAt: g.createdAt,
           updatedAt: g.updatedAt,
           unreadCount: unreadByGroup.get(gid) || 0,
-          lastMessage: lm
-            ? {
-                text: lm.text,
-                kind: lm.kind,
-                username: lm.username,
-                senderId: lm.senderId,
-                createdAt: lm.createdAt,
-              }
-            : null,
+          lastMessage: serializeLastMessage(lm),
         };
       }),
     );
@@ -649,17 +644,61 @@ const loadGroupForMember = async (
   return group;
 };
 
-const serializeMessage = (m: any) => ({
-  _id: m._id,
-  groupId: m.groupId,
-  userId: m.userId,
-  username: m.username,
-  profilePicUrl: m.profilePicUrl,
-  text: m.text,
-  kind: m.kind,
-  eventRef: m.eventRef,
-  createdAt: m.createdAt,
-});
+// Ceilings mirroring the event-reaction limits, so one message can't
+// accumulate an unbounded reaction row.
+const MAX_DISTINCT_REACTIONS_PER_MESSAGE = 20;
+const MAX_REACTIONS_PER_USER_PER_MESSAGE = 20;
+
+// Only https — the URL is handed straight to the client's <Image>, and the
+// upload Lambda returns https. Left open to any host rather than pinned to
+// the upload bucket so remote GIF URLs can reuse this path later.
+const isValidImageUrl = (value: unknown): value is string =>
+  typeof value === "string" &&
+  value.length <= 2048 &&
+  /^https:\/\/\S+$/i.test(value.trim());
+
+// Deleted messages keep their row (stable pagination cursors and unread
+// counts) but surrender their content, so the redaction lives here rather
+// than at each call site.
+const serializeMessage = (m: any) => {
+  const deleted = !!m.deletedAt;
+  return {
+    _id: m._id,
+    groupId: m.groupId,
+    userId: m.userId,
+    username: m.username,
+    profilePicUrl: m.profilePicUrl,
+    text: deleted ? "" : m.text || "",
+    kind: m.kind,
+    eventRef: deleted ? undefined : m.eventRef,
+    imageUrl: deleted ? undefined : m.imageUrl,
+    imageWidth: deleted ? undefined : m.imageWidth,
+    imageHeight: deleted ? undefined : m.imageHeight,
+    reactions: deleted
+      ? []
+      : (m.reactions || []).map((r: any) => ({
+          userId: String(r.userId),
+          emoji: r.emoji,
+        })),
+    deletedAt: m.deletedAt || undefined,
+    createdAt: m.createdAt,
+  };
+};
+
+// Shape used for the Groups tab row preview. The FE localizes the empty
+// cases, so it needs to know *why* the text is blank.
+const serializeLastMessage = (m: any) =>
+  m
+    ? {
+        text: m.deletedAt ? "" : m.text || "",
+        kind: m.kind,
+        username: m.username,
+        senderId: m.senderId ?? m.userId,
+        hasImage: !m.deletedAt && !!m.imageUrl,
+        deleted: !!m.deletedAt,
+        createdAt: m.createdAt,
+      }
+    : null;
 
 // GET /groups/:id/messages — newest-first page. `before` (ISO date) is a
 // cursor for loading older messages; `limit` caps at 50.
@@ -697,20 +736,38 @@ router.get("/:id/messages", async (req: Request, res: Response) => {
   }
 });
 
-// POST /groups/:id/messages — post a text message. Broadcasts to the
-// group room (live thread) and each member's user room (badge/list),
-// then pushes to members who aren't currently watching the thread.
+// POST /groups/:id/messages — post a message carrying text, an image, or
+// both. Broadcasts to the group room (live thread) and each member's user
+// room (badge/list), then pushes to members not currently watching.
 router.post("/:id/messages", async (req: Request, res: Response) => {
   const userId = requireUserId(req, res);
   if (!userId) return;
 
   const text = (req.body?.text || "").toString().trim();
-  if (!text) {
+  const rawImageUrl = req.body?.imageUrl;
+  const hasImage = rawImageUrl !== undefined && rawImageUrl !== null && rawImageUrl !== "";
+
+  if (hasImage && !isValidImageUrl(rawImageUrl)) {
+    return res.status(400).json({ message: "Invalid image URL" });
+  }
+  const imageUrl = hasImage ? String(rawImageUrl).trim() : undefined;
+
+  // A message needs *something* in it; an image alone is a valid message.
+  if (!text && !imageUrl) {
     return res.status(400).json({ message: "Message text is required" });
   }
   if (text.length > 2000) {
     return res.status(400).json({ message: "Message is too long" });
   }
+
+  // Dimensions are a rendering hint only, so bad values are dropped rather
+  // than rejected — the client just falls back to a default aspect ratio.
+  const toDimension = (value: unknown): number | undefined => {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 && n <= 20000 ? Math.round(n) : undefined;
+  };
+  const imageWidth = imageUrl ? toDimension(req.body?.imageWidth) : undefined;
+  const imageHeight = imageUrl ? toDimension(req.body?.imageHeight) : undefined;
 
   try {
     const group = await loadGroupForMember(req, res, userId);
@@ -727,6 +784,9 @@ router.post("/:id/messages", async (req: Request, res: Response) => {
       profilePicUrl: (sender as any)?.profilePicUrl,
       text,
       kind: "text",
+      imageUrl,
+      imageWidth,
+      imageHeight,
     });
     const message = serializeMessage(created);
 
@@ -747,13 +807,7 @@ router.post("/:id/messages", async (req: Request, res: Response) => {
     const activity = {
       groupId: String(group._id),
       senderId: userId,
-      lastMessage: {
-        text: message.text,
-        kind: message.kind,
-        username: message.username,
-        senderId: message.userId,
-        createdAt: message.createdAt,
-      },
+      lastMessage: serializeLastMessage(created),
     };
     socketService.emitToUsers(memberIds, "group:activity", activity);
 
@@ -766,10 +820,11 @@ router.post("/:id/messages", async (req: Request, res: Response) => {
     if (pushTargets.length > 0) {
       const senderName =
         (sender as any)?.name || (sender as any)?.username || "Someone";
+      const preview = text || "📷 Photo";
       notificationService.sendPushNotificationToMany(
         pushTargets,
         group.name,
-        `${senderName}: ${text}`,
+        `${senderName}: ${preview}`,
         "group_message",
         { groupId: String(group._id), groupName: group.name },
       );
@@ -807,5 +862,247 @@ router.post("/:id/read", async (req: Request, res: Response) => {
     return res.status(500).json({ message: "Failed to mark read" });
   }
 });
+
+// DELETE /groups/:id/messages/:messageId — retract your own message.
+// Soft delete: the row stays so pagination and unread counts don't shift
+// under everyone else, but the content is cleared server-side so it can't
+// be recovered by a client that already had the id.
+router.delete(
+  "/:id/messages/:messageId",
+  async (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
+
+    try {
+      const group = await loadGroupForMember(req, res, userId);
+      if (!group) return;
+
+      const message = await GroupMessage.findById(req.params.messageId);
+      // Scope the lookup to this group so a valid id from another thread
+      // can't be deleted through a group the caller happens to be in.
+      if (!message || String(message.groupId) !== String(group._id)) {
+        return res.status(404).json({ message: "Message not found" });
+      }
+      // System messages are app-authored history, not anyone's to retract.
+      if (message.kind === "system") {
+        return res
+          .status(403)
+          .json({ message: "System messages can't be deleted" });
+      }
+      if (String(message.userId) !== String(userId)) {
+        return res
+          .status(403)
+          .json({ message: "You can only delete your own messages" });
+      }
+
+      if (!message.deletedAt) {
+        message.deletedAt = new Date();
+        message.text = "";
+        message.imageUrl = undefined;
+        message.imageWidth = undefined;
+        message.imageHeight = undefined;
+        message.reactions = [];
+        await message.save();
+      }
+
+      const payload = {
+        groupId: String(group._id),
+        messageId: String(message._id),
+      };
+      socketService.emitToGroup(
+        String(group._id),
+        "group:message:deleted",
+        payload,
+      );
+
+      // The Groups tab shows a preview of the newest message, which may be
+      // the one just deleted — recompute it so the row doesn't sit there
+      // quoting text that no longer exists.
+      const latest = await GroupMessage.findOne({ groupId: String(group._id) })
+        .sort({ createdAt: -1 })
+        .lean();
+      const memberIds = (group.members as IGroupMember[]).map((m) =>
+        String(m.userId),
+      );
+      socketService.emitToUsers(memberIds, "group:activity", {
+        groupId: String(group._id),
+        senderId: userId,
+        lastMessage: serializeLastMessage(latest),
+      });
+
+      return res.status(200).json({ success: true, ...payload });
+    } catch (err) {
+      console.error("Failed to delete group message:", err);
+      return res.status(500).json({ message: "Failed to delete message" });
+    }
+  },
+);
+
+// GET /groups/:id/messages/:messageId/reactions — who reacted, and with
+// what. Hydrated here rather than on the client so the FE doesn't have to
+// pull the whole user list to resolve a handful of ids.
+router.get(
+  "/:id/messages/:messageId/reactions",
+  async (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
+
+    try {
+      const group = await loadGroupForMember(req, res, userId);
+      if (!group) return;
+
+      const message = await GroupMessage.findById(req.params.messageId).lean();
+      if (!message || String(message.groupId) !== String(group._id)) {
+        return res.status(404).json({ message: "Message not found" });
+      }
+      if ((message as any).deletedAt) {
+        return res.status(200).json({ success: true, reactions: [] });
+      }
+
+      const raw = ((message as any).reactions || []) as any[];
+      const users = await User.find({
+        _id: { $in: raw.map((r) => r.userId) },
+      })
+        .select("username name profilePicUrl")
+        .lean();
+      const byId = new Map(users.map((u: any) => [String(u._id), u]));
+
+      // Reactors we can't resolve (deleted accounts) are dropped rather
+      // than rendered as blanks; the pill count still reflects them.
+      const reactions = raw
+        .map((r) => {
+          const u = byId.get(String(r.userId));
+          return u
+            ? {
+                userId: String(r.userId),
+                emoji: r.emoji,
+                username: u.username,
+                name: u.name,
+                profilePicUrl: u.profilePicUrl,
+              }
+            : null;
+        })
+        .filter(Boolean);
+
+      return res.status(200).json({ success: true, reactions });
+    } catch (err) {
+      console.error("Failed to fetch message reactions:", err);
+      return res.status(500).json({ message: "Failed to fetch reactions" });
+    }
+  },
+);
+
+// POST /groups/:id/messages/:messageId/react — toggle one (user, emoji)
+// pair on a message. Same Discord-style semantics as event reactions: a
+// user can hold several different emoji at once, and tapping one they
+// already used removes just that one. Deliberately no push notification —
+// reactions in an active thread would be relentless.
+router.post(
+  "/:id/messages/:messageId/react",
+  async (req: Request, res: Response) => {
+    const userId = requireUserId(req, res);
+    if (!userId) return;
+
+    const requested = req.body?.emoji;
+    if (!isValidEmoji(requested)) {
+      return res.status(400).json({ message: "Invalid reaction" });
+    }
+    const emoji = requested.trim();
+
+    try {
+      const group = await loadGroupForMember(req, res, userId);
+      if (!group) return;
+
+      const message = await GroupMessage.findById(req.params.messageId);
+      if (!message || String(message.groupId) !== String(group._id)) {
+        return res.status(404).json({ message: "Message not found" });
+      }
+      if (message.deletedAt) {
+        return res
+          .status(400)
+          .json({ message: "Can't react to a deleted message" });
+      }
+
+      const existing = message.reactions || [];
+      const index = existing.findIndex(
+        (r) => String(r.userId) === String(userId) && r.emoji === emoji,
+      );
+
+      const added = index < 0;
+      if (index >= 0) {
+        existing.splice(index, 1);
+      } else {
+        // Only guard growth — removing is always allowed, so a user can
+        // always undo their way back under a limit.
+        const distinct = new Set(existing.map((r) => r.emoji));
+        if (
+          !distinct.has(emoji) &&
+          distinct.size >= MAX_DISTINCT_REACTIONS_PER_MESSAGE
+        ) {
+          return res
+            .status(400)
+            .json({ message: "This message has too many different reactions" });
+        }
+        const mine = existing.filter(
+          (r) => String(r.userId) === String(userId),
+        );
+        if (mine.length >= MAX_REACTIONS_PER_USER_PER_MESSAGE) {
+          return res
+            .status(400)
+            .json({ message: "You've added too many reactions" });
+        }
+        existing.push({
+          userId: String(userId),
+          emoji,
+          reactedAt: new Date(),
+        });
+      }
+
+      message.reactions = existing;
+      message.markModified("reactions");
+      await message.save();
+
+      const reactions = (message.reactions || []).map((r) => ({
+        userId: String(r.userId),
+        emoji: r.emoji,
+      }));
+      socketService.emitToGroup(
+        String(group._id),
+        "group:message:reacted",
+        {
+          groupId: String(group._id),
+          messageId: String(message._id),
+          reactions,
+        },
+      );
+
+      // Only the message's author hears about it, and only on add — a
+      // removal isn't news, and notifying the whole room would make an
+      // active thread unbearable.
+      if (added && String(message.userId) !== String(userId)) {
+        const reactorName = await actorDisplayName(userId);
+        const preview = message.text
+          ? `"${message.text.slice(0, 60)}"`
+          : "your photo";
+        notificationService.sendPushNotification({
+          userId: String(message.userId),
+          title: group.name,
+          body: `${reactorName} reacted ${emoji} to ${preview}`,
+          type: "group_reaction",
+          data: {
+            groupId: String(group._id),
+            groupName: group.name,
+            messageId: String(message._id),
+          },
+        });
+      }
+
+      return res.status(200).json({ success: true, reactions });
+    } catch (err) {
+      console.error("Failed to react to group message:", err);
+      return res.status(500).json({ message: "Failed to react" });
+    }
+  },
+);
 
 export default router;

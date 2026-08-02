@@ -1,5 +1,5 @@
 {
-  "watch": ["app.ts", "routes/", "services/", "models/", "middleware/"],
+  "watch": ["app.ts", "routes/", "services/", "models/", "middleware/", "utils/"],
   "ext": "ts,json",
   "ignore": ["node_modules/", "dist/", "*.test.ts"],
   "exec": "node -r ts-node/register app.ts"
