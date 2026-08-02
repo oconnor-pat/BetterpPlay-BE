@@ -2,6 +2,7 @@ import { Router, Request, Response } from "express";
 import mongoose from "mongoose";
 import User from "../models/user";
 import Event from "../models/event";
+import blockService from "../services/blockService";
 
 const router = Router();
 
@@ -92,6 +93,13 @@ router.get("/users", async (req: Request, res: Response) => {
 
     const useProximity = lat && lng && maxDistance;
 
+    // People blocked in either direction don't appear in discovery at
+    // all. Resolved once up front so both branches below can use it.
+    const hiddenIds = currentUser?.id
+      ? await blockService.getHiddenUserIds(String(currentUser.id))
+      : new Set<string>();
+    const hiddenObjectIds = blockService.toObjectIds(hiddenIds);
+
     let users: any[];
 
     if (useProximity) {
@@ -135,6 +143,12 @@ router.get("/users", async (req: Request, res: Response) => {
       if (currentUserId) {
         visibilityFilter._id = { $ne: currentUserId };
       }
+      if (hiddenObjectIds.length > 0) {
+        visibilityFilter._id = {
+          ...(visibilityFilter._id || {}),
+          $nin: hiddenObjectIds,
+        };
+      }
 
       pipeline.push({ $match: visibilityFilter });
 
@@ -175,6 +189,10 @@ router.get("/users", async (req: Request, res: Response) => {
       const activityFilter = activity || sport;
       if (activityFilter && typeof activityFilter === "string") {
         filter.favoriteActivities = activityFilter;
+      }
+
+      if (hiddenObjectIds.length > 0) {
+        filter._id = { $nin: hiddenObjectIds };
       }
 
       users = await User.find(filter).select("-password").lean();
@@ -253,6 +271,29 @@ router.get("/user/:id", async (req: Request, res: Response) => {
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
+
+    // A blocked profile is hidden from both sides, but the two get
+    // different answers. Someone who did the blocking is told as much,
+    // so their client can offer Unblock rather than a dead end; someone
+    // who was blocked gets the response a deleted account gives, since
+    // a distinct error would confirm the block.
+    const viewer = (req as any).user;
+    if (viewer?.id && String(viewer.id) !== String(req.params.id)) {
+      const { iBlocked, theyBlocked } = await blockService.getPairState(
+        String(viewer.id),
+        String(req.params.id),
+      );
+      if (iBlocked) {
+        return res.status(403).json({
+          message: "You've blocked this person",
+          code: "blocked_by_me",
+        });
+      }
+      if (theyBlocked) {
+        return res.status(404).json({ message: "User not found" });
+      }
+    }
+
     return res.status(200).json({ success: true, user });
   } catch (error) {
     return res.status(500).json({ message: "Failed to fetch user data" });

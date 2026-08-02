@@ -2,6 +2,7 @@ import { Router, Request, Response } from "express";
 import User from "../models/user";
 import Event from "../models/event";
 import notificationService from "../services/notificationService";
+import blockService from "../services/blockService";
 
 const router = Router();
 
@@ -20,8 +21,17 @@ router.get("/users/me/friends", async (req: Request, res: Response) => {
       return res.status(404).json({ message: "User not found" });
     }
 
+    // Blocking already unfriends both sides, so this is a backstop: the
+    // two updates aren't in a transaction, and a stale friendship
+    // surviving a block is the one failure mode worth being defensive
+    // about here.
+    const hiddenIds = await blockService.getHiddenUserIds(String(user.id));
+    const visibleFriends = (currentUser.friends as any[]).filter(
+      (friend: any) => !hiddenIds.has(String(friend._id)),
+    );
+
     const friendsWithStats = await Promise.all(
-      (currentUser.friends as any[]).map(async (friend: any) => {
+      visibleFriends.map(async (friend: any) => {
         const eventsCreated = await Event.countDocuments({
           createdBy: friend._id.toString(),
         });
@@ -94,6 +104,13 @@ router.post(
 
       const targetUser = await User.findById(userId);
       if (!targetUser) {
+        return res.status(404).json({ message: "User not found" });
+      }
+
+      // Blocked in either direction: reads as a missing account rather
+      // than a refusal, so the request can't be used to probe whether
+      // someone has blocked you.
+      if (await blockService.isBlockedBetween(String(user.id), String(userId))) {
         return res.status(404).json({ message: "User not found" });
       }
 

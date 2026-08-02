@@ -1,7 +1,12 @@
-// Shared validation for user-supplied reaction emoji. Used by both event
-// reactions (routes/events.ts) and group chat message reactions
-// (routes/groups.ts) so the two surfaces can't drift apart on what counts
-// as an acceptable reaction.
+// Shared validation for user-supplied reaction emoji. Used by event
+// reactions (routes/events.ts), group chat messages (routes/groups.ts)
+// and direct messages (routes/dm.ts) so the surfaces can't drift apart on
+// what counts as an acceptable reaction.
+
+// Caps on a single message's reactions. Distinct emoji are limited so the
+// pill row stays renderable; the per-user cap stops one person filling it.
+export const MAX_DISTINCT_REACTIONS_PER_MESSAGE = 20;
+export const MAX_REACTIONS_PER_USER_PER_MESSAGE = 20;
 
 // Any emoji is allowed (the client ships a full picker), so this can't be a
 // whitelist check. Instead: reject anything with ASCII letters and require at

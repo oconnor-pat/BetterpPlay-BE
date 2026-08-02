@@ -7,7 +7,12 @@ import Event from "../models/event";
 import groupEventLink from "../services/groupEventLink";
 import notificationService from "../services/notificationService";
 import socketService from "../services/socketService";
-import { isValidEmoji } from "../utils/emoji";
+import blockService from "../services/blockService";
+import {
+  isValidEmoji,
+  MAX_DISTINCT_REACTIONS_PER_MESSAGE,
+  MAX_REACTIONS_PER_USER_PER_MESSAGE,
+} from "../utils/emoji";
 
 const router = Router();
 
@@ -390,6 +395,13 @@ router.post("/:id/members", async (req: Request, res: Response) => {
     if (!targetUser) {
       return res.status(400).json({ message: "User not found" });
     }
+    // Pulling someone you've blocked into a shared room would undo the
+    // block, so the add is refused rather than silently half-applied.
+    if (await blockService.isBlockedBetween(userId, targetId)) {
+      return res
+        .status(403)
+        .json({ message: "You can't add this person to a group" });
+    }
     if (isMember(group, targetId)) {
       return res
         .status(200)
@@ -644,11 +656,6 @@ const loadGroupForMember = async (
   return group;
 };
 
-// Ceilings mirroring the event-reaction limits, so one message can't
-// accumulate an unbounded reaction row.
-const MAX_DISTINCT_REACTIONS_PER_MESSAGE = 20;
-const MAX_REACTIONS_PER_USER_PER_MESSAGE = 20;
-
 // Only https — the URL is handed straight to the client's <Image>, and the
 // upload Lambda returns https. Left open to any host rather than pinned to
 // the upload bucket so remote GIF URLs can reuse this path later.
@@ -660,27 +667,36 @@ const isValidImageUrl = (value: unknown): value is string =>
 // Deleted messages keep their row (stable pagination cursors and unread
 // counts) but surrender their content, so the redaction lives here rather
 // than at each call site.
-const serializeMessage = (m: any) => {
+//
+// Messages from a blocked member are redacted the same way but flagged
+// separately, so the client can say "hidden because you blocked this
+// person" rather than "deleted". They keep their row for a different
+// reason: silently vanishing messages make the surrounding replies read
+// as non-sequiturs, and the placeholder is expandable on the client.
+const serializeMessage = (m: any, hiddenIds?: Set<string>) => {
   const deleted = !!m.deletedAt;
+  const blocked = !!hiddenIds?.has(String(m.userId));
+  const redacted = deleted || blocked;
   return {
     _id: m._id,
     groupId: m.groupId,
     userId: m.userId,
     username: m.username,
-    profilePicUrl: m.profilePicUrl,
-    text: deleted ? "" : m.text || "",
+    profilePicUrl: blocked ? undefined : m.profilePicUrl,
+    text: redacted ? "" : m.text || "",
     kind: m.kind,
-    eventRef: deleted ? undefined : m.eventRef,
-    imageUrl: deleted ? undefined : m.imageUrl,
-    imageWidth: deleted ? undefined : m.imageWidth,
-    imageHeight: deleted ? undefined : m.imageHeight,
-    reactions: deleted
+    eventRef: redacted ? undefined : m.eventRef,
+    imageUrl: redacted ? undefined : m.imageUrl,
+    imageWidth: redacted ? undefined : m.imageWidth,
+    imageHeight: redacted ? undefined : m.imageHeight,
+    reactions: redacted
       ? []
       : (m.reactions || []).map((r: any) => ({
           userId: String(r.userId),
           emoji: r.emoji,
         })),
     deletedAt: m.deletedAt || undefined,
+    blocked: blocked || undefined,
     createdAt: m.createdAt,
   };
 };
@@ -725,9 +741,11 @@ router.get("/:id/messages", async (req: Request, res: Response) => {
       .limit(limit)
       .lean();
 
+    const hiddenIds = await blockService.getHiddenUserIds(userId);
+
     return res.status(200).json({
       success: true,
-      messages: messages.map(serializeMessage),
+      messages: messages.map((m) => serializeMessage(m, hiddenIds)),
       hasMore: messages.length === limit,
     });
   } catch (err) {

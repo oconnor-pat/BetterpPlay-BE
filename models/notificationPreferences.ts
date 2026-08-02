@@ -27,6 +27,16 @@ export interface INotificationPreferences extends Document {
   // because it's the one group ping that's purely social — plenty of
   // people want the messages but not a buzz per emoji.
   groupReactions: boolean;
+  // Direct messages. Split in two because they have different senders:
+  // directMessages covers threads you've already accepted, while
+  // messageRequests is the single ping you get when a stranger opens a
+  // thread with you. Muting the day-to-day chatter shouldn't mute the
+  // one notification that tells you someone new is trying to reach you.
+  directMessages: boolean;
+  messageRequests: boolean;
+  // Reactions on your own direct messages — the DM counterpart to
+  // groupReactions, and split off for the same reason.
+  dmReactions: boolean;
   pushEnabled: boolean;
   createdAt: Date;
   updatedAt: Date;
@@ -86,6 +96,18 @@ const NotificationPreferencesSchema: Schema = new Schema(
       default: true,
     },
     groupReactions: {
+      type: Boolean,
+      default: true,
+    },
+    directMessages: {
+      type: Boolean,
+      default: true,
+    },
+    messageRequests: {
+      type: Boolean,
+      default: true,
+    },
+    dmReactions: {
       type: Boolean,
       default: true,
     },

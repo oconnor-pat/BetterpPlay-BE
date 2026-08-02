@@ -144,6 +144,9 @@ export type NotificationType =
   | "group_ownership_transferred"
   | "group_message"
   | "group_reaction"
+  | "direct_message"
+  | "message_request"
+  | "direct_message_reaction"
   | "general";
 
 interface SendNotificationOptions {
@@ -232,6 +235,19 @@ export const sendPushNotification = async (
           break;
         case "group_reaction":
           if (preferences.groupReactions === false) return false;
+          break;
+        case "direct_message":
+          if (preferences.directMessages === false) return false;
+          break;
+        // Message requests are kept separate from ordinary DMs: this is
+        // the one message ping that can come from a stranger, so it needs
+        // to be mutable on its own. It also fires at most once per
+        // thread, so muting DMs shouldn't silently mute it too.
+        case "message_request":
+          if (preferences.messageRequests === false) return false;
+          break;
+        case "direct_message_reaction":
+          if (preferences.dmReactions === false) return false;
           break;
       }
     }

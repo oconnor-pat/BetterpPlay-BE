@@ -104,6 +104,9 @@ router.get(
             groupEvents: preferences.groupEvents,
             groupMessages: preferences.groupMessages,
             groupReactions: preferences.groupReactions,
+            directMessages: preferences.directMessages,
+            messageRequests: preferences.messageRequests,
+            dmReactions: preferences.dmReactions,
             pushEnabled: preferences.pushEnabled,
           },
         });
@@ -143,6 +146,9 @@ router.put(
         groupEvents,
         groupMessages,
         groupReactions,
+        directMessages,
+        messageRequests,
+        dmReactions,
         pushEnabled,
       } = req.body;
 
@@ -172,6 +178,11 @@ router.put(
         updates.groupMessages = groupMessages;
       if (typeof groupReactions === "boolean")
         updates.groupReactions = groupReactions;
+      if (typeof directMessages === "boolean")
+        updates.directMessages = directMessages;
+      if (typeof messageRequests === "boolean")
+        updates.messageRequests = messageRequests;
+      if (typeof dmReactions === "boolean") updates.dmReactions = dmReactions;
       if (typeof pushEnabled === "boolean") updates.pushEnabled = pushEnabled;
 
       const preferences =
@@ -197,6 +208,9 @@ router.put(
             groupEvents: preferences.groupEvents,
             groupMessages: preferences.groupMessages,
             groupReactions: preferences.groupReactions,
+            directMessages: preferences.directMessages,
+            messageRequests: preferences.messageRequests,
+            dmReactions: preferences.dmReactions,
             pushEnabled: preferences.pushEnabled,
           },
         });

@@ -7,6 +7,7 @@ import GroupMessage from "../models/groupMessage";
 import communityNote from "../models/communityNote";
 import notificationService from "../services/notificationService";
 import socketService from "../services/socketService";
+import blockService from "../services/blockService";
 import { isValidEmoji } from "../utils/emoji";
 
 const router = Router();
@@ -164,7 +165,17 @@ router.get("/", async (req: Request, res: Response) => {
 
     const allEvents = await Event.find(baseQuery).lean();
 
+    // Events created by someone blocked in either direction drop out of
+    // the feed entirely, before any privacy rules are considered.
+    const hiddenIds = currentUserId
+      ? await blockService.getHiddenUserIds(String(currentUserId))
+      : new Set<string>();
+
     const visibleEvents = allEvents.filter((event: any) => {
+      if (hiddenIds.has(String(event.createdBy))) {
+        return false;
+      }
+
       const privacy = event.privacy || "public";
 
       if (privacy === "public") {
@@ -311,6 +322,16 @@ router.get("/:id", async (req: Request, res: Response) => {
       String(id),
     );
     const eventCreatorId = String((event as any).createdBy);
+
+    // Reached by direct link or a stale notification: an event by
+    // someone blocked in either direction reads as gone, not forbidden,
+    // since a distinct error would confirm the block to the other side.
+    if (
+      currentUserId &&
+      (await blockService.isBlockedBetween(currentUserId, eventCreatorId))
+    ) {
+      return res.status(404).json({ message: "Event not found" });
+    }
 
     if (privacy === "private") {
       if (!currentUserId || eventCreatorId !== currentUserId) {

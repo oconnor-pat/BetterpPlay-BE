@@ -28,6 +28,9 @@ export interface INotification extends Document {
     | "group_ownership_transferred"
     | "group_message"
     | "group_reaction"
+    | "direct_message"
+    | "message_request"
+    | "direct_message_reaction"
     | "general";
   data?: Record<string, any>;
   read: boolean;
@@ -77,6 +80,9 @@ const NotificationSchema: Schema = new Schema(
         "group_ownership_transferred",
         "group_message",
         "group_reaction",
+        "direct_message",
+        "message_request",
+        "direct_message_reaction",
         "general",
       ],
       required: true,

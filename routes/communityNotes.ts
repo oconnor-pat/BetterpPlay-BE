@@ -5,13 +5,36 @@ import User from "../models/user";
 import Event from "../models/event";
 import notificationService from "../services/notificationService";
 import socketService from "../services/socketService";
+import blockService from "../services/blockService";
 
 const router = Router();
 
 router.get("/", async (req: Request, res: Response) => {
   try {
-    const posts = await communityNote.find().lean();
-    console.log("📝 Fetched posts count:", posts.length);
+    const allPosts = await communityNote.find().lean();
+
+    // Drop anything written by someone blocked in either direction — the
+    // post itself, and individual comments and replies inside posts that
+    // are otherwise visible.
+    const viewer = (req as any).user;
+    const hiddenIds = viewer?.id
+      ? await blockService.getHiddenUserIds(String(viewer.id))
+      : new Set<string>();
+    const posts = hiddenIds.size
+      ? allPosts
+          .filter((post: any) => !hiddenIds.has(String(post.userId)))
+          .map((post: any) => ({
+            ...post,
+            comments: (post.comments || [])
+              .filter((c: any) => !hiddenIds.has(String(c.userId)))
+              .map((c: any) => ({
+                ...c,
+                replies: (c.replies || []).filter(
+                  (r: any) => !hiddenIds.has(String(r.userId)),
+                ),
+              })),
+          }))
+      : allPosts;
 
     const userIds = new Set<string>();
     posts.forEach((post: any) => {
@@ -114,13 +137,33 @@ router.get(
   async (req: Request, res: Response) => {
     try {
       const { eventId } = req.params;
-      const post = await communityNote.findOne({ eventId }).lean();
+      const found = await communityNote.findOne({ eventId }).lean();
 
-      if (!post) {
+      if (!found) {
         return res
           .status(404)
           .json({ message: "No post found for this event." });
       }
+
+      // Same filtering as the main feed: comments and replies from
+      // blocked people are stripped out of an otherwise visible thread.
+      const viewer = (req as any).user;
+      const hiddenIds = viewer?.id
+        ? await blockService.getHiddenUserIds(String(viewer.id))
+        : new Set<string>();
+      const post: any = hiddenIds.size
+        ? {
+            ...(found as any),
+            comments: ((found as any).comments || [])
+              .filter((c: any) => !hiddenIds.has(String(c.userId)))
+              .map((c: any) => ({
+                ...c,
+                replies: (c.replies || []).filter(
+                  (r: any) => !hiddenIds.has(String(r.userId)),
+                ),
+              })),
+          }
+        : found;
 
       const userIds = new Set<string>();
       if ((post as any).userId) userIds.add(String((post as any).userId));

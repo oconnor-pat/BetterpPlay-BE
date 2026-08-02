@@ -1,5 +1,3 @@
-import fetch from 'node-fetch';
-
 const registrationData = {
   name: 'Test User',
   email: 'testuser@example.com',
@@ -10,6 +8,7 @@ const apiUrl = 'http://localhost:8000'; // Update the URL to match your API endp
 
 async function registerUser() {
   try {
+    const { default: fetch } = await import('node-fetch');
     const response = await fetch(`${apiUrl}/auth/register`, {
       method: 'POST',
       body: JSON.stringify(registrationData),

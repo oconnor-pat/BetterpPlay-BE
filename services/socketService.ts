@@ -73,6 +73,14 @@ class SocketService {
         socket.leave(`group:${groupId}`);
       });
 
+      socket.on("join:conversation", (conversationId: string) => {
+        socket.join(`conversation:${conversationId}`);
+      });
+
+      socket.on("leave:conversation", (conversationId: string) => {
+        socket.leave(`conversation:${conversationId}`);
+      });
+
       socket.on("disconnect", () => {
         const sockets = this.userSockets.get(userId);
         if (sockets) {
@@ -111,19 +119,23 @@ class SocketService {
     this.io?.to(`group:${groupId}`).emit(event, data);
   }
 
+  emitToConversation(conversationId: string, event: string, data: any): void {
+    this.io?.to(`conversation:${conversationId}`).emit(event, data);
+  }
+
   emitToAll(event: string, data: any): void {
     this.io?.emit(event, data);
   }
 
-  // Returns the set of userIds currently connected to a group's chat
-  // room. Used to decide who needs a push notification for a new message
-  // (people actively watching the thread get the live socket update
-  // instead, so pushing them too would be noisy/redundant).
-  async getUserIdsInGroupRoom(groupId: string): Promise<Set<string>> {
+  // Returns the set of userIds currently connected to a chat room. Used
+  // to decide who needs a push notification for a new message (people
+  // actively watching the thread get the live socket update instead, so
+  // pushing them too would be noisy/redundant).
+  private async getUserIdsInRoom(room: string): Promise<Set<string>> {
     const result = new Set<string>();
     if (!this.io) return result;
     try {
-      const sockets = await this.io.in(`group:${groupId}`).fetchSockets();
+      const sockets = await this.io.in(room).fetchSockets();
       for (const s of sockets) {
         const uid = (s.data as any)?.userId;
         if (uid) result.add(String(uid));
@@ -134,6 +146,16 @@ class SocketService {
       // more, which is the safe direction.
     }
     return result;
+  }
+
+  async getUserIdsInGroupRoom(groupId: string): Promise<Set<string>> {
+    return this.getUserIdsInRoom(`group:${groupId}`);
+  }
+
+  async getUserIdsInConversationRoom(
+    conversationId: string,
+  ): Promise<Set<string>> {
+    return this.getUserIdsInRoom(`conversation:${conversationId}`);
   }
 
   isUserOnline(userId: string): boolean {

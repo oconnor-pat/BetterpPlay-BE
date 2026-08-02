@@ -16,6 +16,9 @@ import friendRoutes from "./routes/friends";
 import userEventRoutes from "./routes/userEvents";
 import communityNoteRoutes from "./routes/communityNotes";
 import groupRoutes from "./routes/groups";
+import dmRoutes from "./routes/dm";
+import blockRoutes from "./routes/blocks";
+import reportRoutes from "./routes/reports";
 
 const app: Application = express();
 const httpServer = createServer(app);
@@ -61,6 +64,11 @@ app.use(friendRoutes);
 app.use(userEventRoutes);
 app.use("/community-notes", communityNoteRoutes);
 app.use("/groups", groupRoutes);
+app.use("/dm", dmRoutes);
+// Both mount at the root: block routes hang off /users/... alongside the
+// friend routes they mirror, and reports use /reports and /admin/reports.
+app.use(blockRoutes);
+app.use(reportRoutes);
 
 const PORT = process.env.PORT || 8001;
 
