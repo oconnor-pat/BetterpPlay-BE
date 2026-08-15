@@ -9,11 +9,41 @@ import notificationService from "../services/notificationService";
 import socketService from "../services/socketService";
 import blockService from "../services/blockService";
 import { isValidEmoji } from "../utils/emoji";
+import { resolveEventStartsAt } from "../utils/eventDateTime";
+import Notification from "../models/notification";
 
 const router = Router();
 
+// How often a creator can re-nudge the same pending invitee.
+const RSVP_PING_COOLDOWN_MS = 60 * 60 * 1000;
+
 // The reaction a legacy "like" maps to, in both directions.
 const LIKE_EMOJI = "❤️";
+
+// How many occurrences we materialize for an indefinite series. Enough to
+// cover ~3 months of weekly events without flooding the calendar; the
+// series can be extended later without changing the "no end" semantics.
+const INDEFINITE_RECURRENCE_HORIZON = 12;
+
+const resolveRecurrenceCount = (
+  recurrenceCount: unknown,
+  recurrenceIndefinite: unknown,
+): { count: number; indefinite: boolean } => {
+  if (
+    recurrenceIndefinite === true ||
+    recurrenceIndefinite === "true" ||
+    recurrenceCount === 0 ||
+    recurrenceCount === "0" ||
+    recurrenceCount === "indefinite"
+  ) {
+    return { count: INDEFINITE_RECURRENCE_HORIZON, indefinite: true };
+  }
+  const n = parseInt(String(recurrenceCount ?? 4), 10);
+  return {
+    count: Math.min(Math.max(isNaN(n) ? 4 : n, 2), 12),
+    indefinite: false,
+  };
+};
 
 // Normalize any incoming date to the canonical "YYYY-MM-DD" storage format.
 // The client's date picker sends `Date.toDateString()` ("Fri Jul 24 2026"),
@@ -24,13 +54,30 @@ const LIKE_EMOJI = "❤️";
 // when a series is first generated.
 const toIsoDate = (input: string): string => {
   if (/^\d{4}-\d{2}-\d{2}$/.test(input)) return input;
-  const d = new Date(input);
-  return isNaN(d.getTime()) ? input : d.toISOString().split("T")[0];
+
+  // Prefer calendar components in local time so "Fri Aug 21 2026" doesn't
+  // flip a day when the server is UTC (Heroku) and we used toISOString().
+  const clean = input.replace(/^[A-Za-z]{3}\s+/, "");
+  const monthDayYear = clean.match(/([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})/);
+  let d: Date | null = null;
+  if (monthDayYear) {
+    d = new Date(`${monthDayYear[1]} ${monthDayYear[2]}, ${monthDayYear[3]}`);
+  }
+  if (!d || isNaN(d.getTime())) {
+    d = new Date(input);
+  }
+  if (isNaN(d.getTime())) {
+    return input;
+  }
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
 };
 
 // Coerce an incoming event duration into a sane number of minutes, or undefined
-// when the client didn't send one (meaning "duration unknown" — clients render
-// only a start time in that case). Bounds mirror the schema so a bad value is
+// when the client didn't send one / sent null (meaning open-ended — clients
+// render only a start time). Bounds mirror the schema so a bad value is
 // dropped rather than failing the whole save.
 const normalizeDuration = (input: unknown): number | undefined => {
   if (input === undefined || input === null || input === "") return undefined;
@@ -40,6 +87,19 @@ const normalizeDuration = (input: unknown): number | undefined => {
   }
   return minutes;
 };
+
+// totalSpots === 0 means "no cap". Kept as a number (not null) so the
+// existing required field stays required and older clients that compare
+// filled/total keep getting a numeric value.
+const isUnlimitedSpots = (totalSpots: unknown): boolean =>
+  Number(totalSpots) === 0;
+
+const isRosterFull = (event: {
+  roster: unknown[];
+  totalSpots: number;
+}): boolean =>
+  !isUnlimitedSpots(event.totalSpots) &&
+  event.roster.length >= event.totalSpots;
 
 // Shift a stored "YYYY-MM-DD" date by `steps` recurrence intervals (steps may
 // be negative). Mirrors the arithmetic used when a recurring series is first
@@ -229,7 +289,29 @@ router.get("/", async (req: Request, res: Response) => {
       {
         $project: {
           eventId: 1,
-          commentCount: { $size: { $ifNull: ["$comments", []] } },
+          // Top-level threads only: the opener (if it has text) plus
+          // comments that aren't nested replies to the opener. Nested
+          // comment.replies never count.
+          commentCount: {
+            $add: [
+              {
+                $cond: [
+                  { $gt: [{ $strLenCP: { $ifNull: ["$text", ""] } }, 0] },
+                  1,
+                  0,
+                ],
+              },
+              {
+                $size: {
+                  $filter: {
+                    input: { $ifNull: ["$comments", []] },
+                    as: "c",
+                    cond: { $ne: ["$$c.replyToPost", true] },
+                  },
+                },
+              },
+            ],
+          },
         },
       },
     ]);
@@ -393,9 +475,13 @@ router.post("/", async (req: Request, res: Response) => {
       invitedUsers,
       allowJoinRequests,
       showLocationPublicly,
+      isVirtual,
       isRecurring,
       recurrenceFrequency,
       recurrenceCount,
+      recurrenceIndefinite,
+      startsAt,
+      timezoneOffsetMinutes,
       venueId,
       venueName,
       groupId,
@@ -407,11 +493,18 @@ router.post("/", async (req: Request, res: Response) => {
       !location ||
       !time ||
       !date ||
-      !totalSpots ||
+      totalSpots === undefined ||
+      totalSpots === null ||
+      totalSpots === "" ||
       !eventType ||
       !createdBy
     ) {
       return res.status(400).json({ message: "Missing required fields" });
+    }
+
+    const spots = Number(totalSpots);
+    if (!Number.isFinite(spots) || spots < 0 || !Number.isInteger(spots)) {
+      return res.status(400).json({ message: "Invalid group size" });
     }
 
     const VALID_EVENT_TYPES = [
@@ -561,28 +654,51 @@ router.post("/", async (req: Request, res: Response) => {
       });
     }
 
+    const storedDate = toIsoDate(date);
+    const offsetMinutes =
+      typeof timezoneOffsetMinutes === "number"
+        ? timezoneOffsetMinutes
+        : typeof timezoneOffsetMinutes === "string" &&
+            timezoneOffsetMinutes !== ""
+          ? Number(timezoneOffsetMinutes)
+          : undefined;
+
+    const resolveStarts = (occurrenceDate: string, occurrenceStartsAt?: unknown) =>
+      resolveEventStartsAt({
+        startsAt: (occurrenceStartsAt as any) || undefined,
+        date: occurrenceDate,
+        time,
+        timezoneOffsetMinutes: Number.isFinite(offsetMinutes as number)
+          ? (offsetMinutes as number)
+          : undefined,
+      }) || undefined;
+
     const baseEventData = {
       name,
       location,
       time,
       durationMinutes: normalizeDuration(durationMinutes),
-      totalSpots,
+      totalSpots: spots,
       eventType,
       createdBy,
       createdByUsername: createdByUsername || user.username,
       rosterSpotsFilled: 0,
       roster: [],
-      latitude,
-      longitude,
+      latitude: isVirtual === true ? undefined : latitude,
+      longitude: isVirtual === true ? undefined : longitude,
       jerseyColors: jerseyColors || [],
       privacy: eventPrivacy,
       invitedUsers: mergedInvitedUsers,
       allowJoinRequests: allowJoinRequests !== false,
       showLocationPublicly: showLocationPublicly === true,
+      isVirtual: isVirtual === true,
+      timezoneOffsetMinutes: Number.isFinite(offsetMinutes as number)
+        ? (offsetMinutes as number)
+        : undefined,
       // Optional venue listing reference (set when a user planned this event
       // from the Venues tab via "Plan event from this page").
-      venueId: venueId || undefined,
-      venueName: venueName || undefined,
+      venueId: isVirtual === true ? undefined : venueId || undefined,
+      venueName: isVirtual === true ? undefined : venueName || undefined,
       // Optional Group reference (set when a user picked "Invite a group"
       // during event creation). Powers the "via [Group]" badge.
       groupId: resolvedGroupId,
@@ -590,27 +706,33 @@ router.post("/", async (req: Request, res: Response) => {
       sourceUrl: sourceUrl || undefined,
     };
 
-    if (isRecurring && recurrenceFrequency && recurrenceCount > 1) {
+    if (isRecurring && recurrenceFrequency && (recurrenceCount > 1 || recurrenceIndefinite || recurrenceCount === 0 || recurrenceCount === "0" || recurrenceCount === "indefinite")) {
       const recurrenceGroupId = new mongoose.Types.ObjectId().toString();
-      const count = Math.min(Math.max(parseInt(recurrenceCount), 2), 12);
+      const { count, indefinite } = resolveRecurrenceCount(
+        recurrenceCount,
+        recurrenceIndefinite ?? req.body?.recurrenceIndefinite,
+      );
       const eventsToCreate = [];
 
       for (let i = 0; i < count; i++) {
-        const eventDate = new Date(date);
-        if (recurrenceFrequency === "weekly") {
-          eventDate.setDate(eventDate.getDate() + i * 7);
-        } else if (recurrenceFrequency === "biweekly") {
-          eventDate.setDate(eventDate.getDate() + i * 14);
-        } else if (recurrenceFrequency === "monthly") {
-          eventDate.setMonth(eventDate.getMonth() + i);
-        }
-
+        const occurrenceDate = shiftRecurrenceDate(
+          storedDate,
+          recurrenceFrequency as "weekly" | "biweekly" | "monthly",
+          i,
+        );
         eventsToCreate.push({
           ...baseEventData,
-          date: eventDate.toISOString().split("T")[0],
+          date: occurrenceDate,
+          // Only the anchor occurrence may carry the client's absolute
+          // startsAt; later ones are derived from date + time + offset.
+          startsAt: resolveStarts(
+            occurrenceDate,
+            i === 0 ? startsAt : undefined,
+          ),
           isRecurring: true,
           recurrenceGroupId,
           recurrenceFrequency,
+          recurrenceIndefinite: indefinite,
         });
       }
 
@@ -627,11 +749,14 @@ router.post("/", async (req: Request, res: Response) => {
         const explicitRecipients = mergedInvitedUsers.filter(
           (id) => !groupMemberIdSet.has(id),
         );
+        const seriesLabel = indefinite
+          ? `${recurrenceFrequency}, no end date`
+          : `${count} recurring events`;
         if (groupRecipients.length > 0 && resolvedGroupName) {
           notificationService.sendPushNotificationToMany(
             groupRecipients,
             `${resolvedGroupName} has a new event`,
-            `${name} — ${count} recurring events scheduled`,
+            `${name} — ${seriesLabel}`,
             "group_event_created",
             {
               eventId: newEvents[0]._id.toString(),
@@ -646,7 +771,7 @@ router.post("/", async (req: Request, res: Response) => {
           notificationService.sendPushNotificationToMany(
             explicitRecipients,
             "Event Invitation 📩",
-            `You've been invited to "${name}" (${count} recurring events)`,
+            `You've been invited to "${name}" (${seriesLabel})`,
             "event_invitation",
             {
               eventId: newEvents[0]._id.toString(),
@@ -664,7 +789,9 @@ router.post("/", async (req: Request, res: Response) => {
           eventId: newEvents[0]._id.toString(),
           eventName: name,
           eventDate: newEvents[0].date,
-          text: `📅 ${name} scheduled — ${count} recurring events`,
+          text: indefinite
+            ? `📅 ${name} scheduled — ${recurrenceFrequency}, no end date`
+            : `📅 ${name} scheduled — ${count} recurring events`,
         });
       }
 
@@ -677,7 +804,8 @@ router.post("/", async (req: Request, res: Response) => {
     } else {
       const newEvent = await Event.create({
         ...baseEventData,
-        date,
+        date: storedDate,
+        startsAt: resolveStarts(storedDate, startsAt),
       });
 
       if (mergedInvitedUsers.length > 0) {
@@ -760,9 +888,12 @@ router.put("/:id", async (req: Request, res: Response) => {
       invitedUsers,
       allowJoinRequests,
       showLocationPublicly,
+      isVirtual,
       isRecurring,
       recurrenceFrequency,
       recurrenceCount,
+      startsAt,
+      timezoneOffsetMinutes,
     } = req.body;
 
     const event = await Event.findById(eventId);
@@ -788,12 +919,53 @@ router.put("/:id", async (req: Request, res: Response) => {
       event.durationMinutes = normalizeDuration(durationMinutes);
     }
     event.date = date ? toIsoDate(date) : event.date;
-    event.totalSpots = totalSpots || event.totalSpots;
+    // `0` is a valid "unlimited" value, so don't treat it as falsy.
+    if (totalSpots !== undefined && totalSpots !== null && totalSpots !== "") {
+      const spots = Number(totalSpots);
+      if (Number.isFinite(spots) && spots >= 0 && Number.isInteger(spots)) {
+        event.totalSpots = spots;
+      }
+    }
+
+    if (
+      typeof timezoneOffsetMinutes === "number" ||
+      (typeof timezoneOffsetMinutes === "string" &&
+        timezoneOffsetMinutes !== "")
+    ) {
+      const offset = Number(timezoneOffsetMinutes);
+      if (Number.isFinite(offset)) {
+        (event as any).timezoneOffsetMinutes = offset;
+      }
+    }
+
+    // Keep the absolute start in sync whenever date/time (or an explicit
+    // startsAt) changes — this is what the reminder scheduler trusts.
+    if (date || time || startsAt || timezoneOffsetMinutes !== undefined) {
+      const resolved = resolveEventStartsAt({
+        startsAt,
+        date: event.date,
+        time: event.time,
+        timezoneOffsetMinutes: (event as any).timezoneOffsetMinutes,
+      });
+      if (resolved) {
+        (event as any).startsAt = resolved;
+      }
+    }
     event.eventType = eventType || event.eventType;
     event.createdByUsername = createdByUsername || event.createdByUsername;
 
-    if (latitude !== undefined) event.latitude = latitude;
-    if (longitude !== undefined) event.longitude = longitude;
+    if (isVirtual !== undefined) {
+      event.isVirtual = isVirtual === true;
+      if (event.isVirtual) {
+        event.latitude = undefined;
+        event.longitude = undefined;
+        event.venueId = undefined;
+        event.venueName = undefined;
+      }
+    }
+    if (latitude !== undefined && !event.isVirtual) event.latitude = latitude;
+    if (longitude !== undefined && !event.isVirtual)
+      event.longitude = longitude;
     if (jerseyColors !== undefined) event.jerseyColors = jerseyColors;
     if (allowJoinRequests !== undefined)
       event.allowJoinRequests = allowJoinRequests !== false;
@@ -881,6 +1053,12 @@ router.put("/:id", async (req: Request, res: Response) => {
       time: event.time,
       durationMinutes: event.durationMinutes,
       date: occurrenceDate,
+      startsAt: resolveEventStartsAt({
+        date: occurrenceDate,
+        time: event.time,
+        timezoneOffsetMinutes: (event as any).timezoneOffsetMinutes,
+      }),
+      timezoneOffsetMinutes: (event as any).timezoneOffsetMinutes,
       totalSpots: event.totalSpots,
       rosterSpotsFilled: 0,
       eventType: event.eventType,
@@ -900,6 +1078,7 @@ router.put("/:id", async (req: Request, res: Response) => {
       isRecurring: true,
       recurrenceGroupId: groupId,
       recurrenceFrequency: event.recurrenceFrequency,
+      recurrenceIndefinite: !!(event as any).recurrenceIndefinite,
       venueId: event.venueId,
       venueName: event.venueName,
       groupId: event.groupId,
@@ -911,13 +1090,18 @@ router.put("/:id", async (req: Request, res: Response) => {
       const frequency = (recurrenceFrequency ||
         event.recurrenceFrequency ||
         "weekly") as "weekly" | "biweekly" | "monthly";
-      // Allow 1 so re-saving the last occurrence of a series (forward count of
-      // 1) is a no-op rather than silently adding a new occurrence. Single →
-      // recurring enforces a floor of 2 separately below.
-      const targetCount = Math.min(
-        Math.max(parseInt(String(recurrenceCount ?? 1), 10) || 1, 1),
-        12,
+      const { count: resolvedCount, indefinite } = resolveRecurrenceCount(
+        recurrenceCount,
+        req.body?.recurrenceIndefinite,
       );
+      // Allow 1 so re-saving the last occurrence of a finite series (forward
+      // count of 1) is a no-op. Indefinite always uses the horizon size.
+      const targetCount = indefinite
+        ? resolvedCount
+        : Math.min(
+            Math.max(parseInt(String(recurrenceCount ?? 1), 10) || 1, 1),
+            12,
+          );
 
       if (!isRecurring && wasRecurring) {
         // Recurring → single: keep only the edited occurrence, delete the rest
@@ -929,6 +1113,7 @@ router.put("/:id", async (req: Request, res: Response) => {
         event.isRecurring = false;
         event.recurrenceGroupId = null as any;
         event.recurrenceFrequency = null as any;
+        (event as any).recurrenceIndefinite = false;
         await event.save();
         seriesChanged = true;
       } else if (isRecurring && !wasRecurring) {
@@ -938,8 +1123,9 @@ router.put("/:id", async (req: Request, res: Response) => {
         event.isRecurring = true;
         event.recurrenceGroupId = newGroupId;
         event.recurrenceFrequency = frequency;
+        (event as any).recurrenceIndefinite = indefinite;
         await event.save();
-        const seriesCount = Math.max(targetCount, 2);
+        const seriesCount = indefinite ? resolvedCount : Math.max(targetCount, 2);
         const toCreate = [];
         for (let k = 1; k < seriesCount; k++) {
           toCreate.push(
@@ -961,6 +1147,7 @@ router.put("/:id", async (req: Request, res: Response) => {
         // occurrence stays the same event. Reused occurrences keep their
         // roster/RSVPs; extras are created empty and any surplus tail removed.
         event.recurrenceFrequency = frequency;
+        (event as any).recurrenceIndefinite = indefinite;
         await event.save();
 
         const series = await Event.find({
@@ -1005,6 +1192,7 @@ router.put("/:id", async (req: Request, res: Response) => {
           t.groupId = event.groupId;
           t.groupName = event.groupName;
           t.sourceUrl = event.sourceUrl;
+          t.recurrenceIndefinite = !!(event as any).recurrenceIndefinite;
         };
 
         // Earlier occurrences: keep their dates, sync shared fields only.
@@ -1025,6 +1213,15 @@ router.put("/:id", async (req: Request, res: Response) => {
             existing.date = occurrenceDate;
             existing.recurrenceFrequency = frequency;
             existing.isRecurring = true;
+            (existing as any).recurrenceIndefinite = indefinite;
+            (existing as any).startsAt = resolveEventStartsAt({
+              date: occurrenceDate,
+              time: event.time,
+              timezoneOffsetMinutes: (event as any).timezoneOffsetMinutes,
+            });
+            (existing as any).timezoneOffsetMinutes = (
+              event as any
+            ).timezoneOffsetMinutes;
             ops.push(existing.save());
           } else {
             ops.push(
@@ -1140,13 +1337,15 @@ router.post("/:id/roster", async (req: Request, res: Response) => {
       return res.status(409).json({ message: "Participant already in roster" });
     }
 
-    // Public events are gated: a user can't add themselves directly, they
-    // must request to join and be approved. The creator can still add anyone.
+    // Public events default to gated join (request → approve). When the
+    // creator turns off allowJoinRequests, anyone can self-join the roster
+    // directly (open join). The creator can always add anyone.
     const actorId = (req as any).user?.id
       ? String((req as any).user.id)
       : null;
     if (
       (event.privacy || "public") === "public" &&
+      event.allowJoinRequests !== false &&
       entry.userId &&
       actorId &&
       String(entry.userId) === actorId &&
@@ -1166,7 +1365,7 @@ router.post("/:id/roster", async (req: Request, res: Response) => {
       event.spotReservation = null;
     }
 
-    if (event.roster.length >= event.totalSpots) {
+    if (isRosterFull(event)) {
       // If there's a valid reservation for this user, allow them through
       if (
         event.spotReservation &&
@@ -1182,6 +1381,7 @@ router.post("/:id/roster", async (req: Request, res: Response) => {
     // If spot is reserved for someone else and roster is at totalSpots - 1,
     // block non-reserved users from taking the last spot
     if (
+      !isUnlimitedSpots(event.totalSpots) &&
       event.spotReservation &&
       entry.userId !== event.spotReservation.userId &&
       event.roster.length >= event.totalSpots - 1
@@ -1408,6 +1608,7 @@ function projectEventForViewer(event: any, viewerId: string | null): any {
       isRecurring: event.isRecurring,
       recurrenceGroupId: event.recurrenceGroupId,
       recurrenceFrequency: event.recurrenceFrequency,
+      recurrenceIndefinite: !!(event as any).recurrenceIndefinite,
       createdAt: event.createdAt,
       likes: event.likes || [],
       reactions: event.reactions || [],
@@ -1432,6 +1633,7 @@ function projectEventForViewer(event: any, viewerId: string | null): any {
   if (!isCreator) {
     // Non-creators (even approved ones) never see who else is waiting.
     full.joinRequests = [];
+    full.guestAddRequests = [];
   }
   return full;
 }
@@ -1446,7 +1648,7 @@ router.delete(
       if (!event) {
         return res.status(404).json({ message: "Event not found" });
       }
-      const wasFull = event.roster.length >= event.totalSpots;
+      const wasFull = isRosterFull(event);
       const initialLength = event.roster.length;
       event.roster = event.roster.filter((p: any) => p.username !== username);
       if (event.roster.length === initialLength) {
@@ -1585,10 +1787,12 @@ router.put("/:id/rsvp", async (req: Request, res: Response) => {
       return res.status(404).json({ message: "Event not found" });
     }
 
-    // Public events are gated — non-creators join via request/approval, not by
-    // RSVPing. The 3-way RSVP is for invite-only events (and the creator).
+    // Public events with approval required can't be joined via RSVP — use
+    // join-request instead. Open-join public events (`allowJoinRequests`
+    // false) allow "going" as a direct roster add.
     if (
       (event.privacy || "public") === "public" &&
+      event.allowJoinRequests !== false &&
       String(event.createdBy) !== String(userId)
     ) {
       return res.status(403).json({
@@ -1611,7 +1815,10 @@ router.put("/:id/rsvp", async (req: Request, res: Response) => {
         const capacity = reservationForOther
           ? event.totalSpots - 1
           : event.totalSpots;
-        if (event.roster.length >= capacity) {
+        if (
+          !isUnlimitedSpots(event.totalSpots) &&
+          event.roster.length >= capacity
+        ) {
           return res.status(400).json({ message: "Event is full", full: true });
         }
         event.roster.push({
@@ -1629,7 +1836,7 @@ router.put("/:id/rsvp", async (req: Request, res: Response) => {
     } else {
       // Maybe / can't: free their roster spot (promoting the waitlist if the
       // event was full), then record the reply.
-      const wasFull = event.roster.length >= event.totalSpots;
+      const wasFull = isRosterFull(event);
       if (onRoster) {
         event.roster = event.roster.filter((p: any) => p.userId !== userId);
         event.rosterSpotsFilled = event.roster.length;
@@ -1813,7 +2020,7 @@ router.post(
       if (!request) {
         return res.status(404).json({ message: "Join request not found" });
       }
-      if (event.roster.length >= event.totalSpots) {
+      if (isRosterFull(event)) {
         return res.status(400).json({ message: "Event is full", full: true });
       }
 
@@ -1917,6 +2124,231 @@ router.post(
   },
 );
 
+// Invitee / roster member asks the creator to invite someone else.
+router.post("/:id/guest-add-request", async (req: Request, res: Response) => {
+  const currentUser = (req as any).user;
+  if (!currentUser?.id) {
+    return res.status(401).json({ message: "Authentication required" });
+  }
+  const userId = String(currentUser.id);
+  const {
+    proposedUserId,
+    proposedUsername,
+    proposedProfilePicUrl,
+    requestedByUsername,
+  } = req.body;
+  if (!proposedUserId || !proposedUsername) {
+    return res.status(400).json({ message: "proposedUserId and proposedUsername are required" });
+  }
+  try {
+    const event = await Event.findById(req.params.id);
+    if (!event) {
+      return res.status(404).json({ message: "Event not found" });
+    }
+    if (String(event.createdBy) === userId) {
+      return res.status(400).json({
+        message: "Creators can invite directly — use the invite endpoint",
+      });
+    }
+    const onRoster = (event.roster || []).some(
+      (p: any) => String(p.userId) === userId,
+    );
+    const isInvited = (event.invitedUsers || []).includes(userId);
+    if (!onRoster && !isInvited) {
+      return res.status(403).json({
+        message: "Only invitees or roster members can suggest guests",
+      });
+    }
+    if (String(proposedUserId) === userId) {
+      return res.status(400).json({ message: "You can't suggest yourself" });
+    }
+    if ((event.invitedUsers || []).includes(String(proposedUserId))) {
+      return res.status(409).json({ message: "That person is already invited" });
+    }
+    if (
+      (event.roster || []).some(
+        (p: any) => String(p.userId) === String(proposedUserId),
+      )
+    ) {
+      return res.status(409).json({ message: "That person is already on the roster" });
+    }
+    if (!(event as any).guestAddRequests) {
+      (event as any).guestAddRequests = [];
+    }
+    const already = (event as any).guestAddRequests.some(
+      (r: any) =>
+        String(r.proposedUserId) === String(proposedUserId) &&
+        String(r.requestedBy) === userId,
+    );
+    if (!already) {
+      (event as any).guestAddRequests.push({
+        requestedBy: userId,
+        requestedByUsername:
+          requestedByUsername || currentUser.username || "",
+        proposedUserId: String(proposedUserId),
+        proposedUsername,
+        proposedProfilePicUrl,
+        requestedAt: new Date(),
+      });
+      await event.save();
+
+      notificationService.sendPushNotification({
+        userId: String(event.createdBy),
+        title: "Guest suggestion",
+        body: `${requestedByUsername || "Someone"} wants to add ${proposedUsername} to "${event.name}"`,
+        type: "event_guest_add_request",
+        data: {
+          eventId: event._id.toString(),
+          eventName: event.name,
+          proposedUserId: String(proposedUserId),
+        },
+      });
+      socketService.emitToUser(String(event.createdBy), "events:refresh", {
+        reason: "guest_add_request",
+        eventId: event._id.toString(),
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      guestAddRequests: (event as any).guestAddRequests,
+    });
+  } catch (error) {
+    console.error("Error creating guest-add request:", error);
+    return res.status(500).json({ message: "Error creating guest-add request" });
+  }
+});
+
+router.post(
+  "/:id/guest-add-request/:proposedUserId/approve",
+  async (req: Request, res: Response) => {
+    const currentUser = (req as any).user;
+    if (!currentUser?.id) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+    try {
+      const event = await Event.findById(req.params.id);
+      if (!event) {
+        return res.status(404).json({ message: "Event not found" });
+      }
+      if (String(event.createdBy) !== String(currentUser.id)) {
+        return res
+          .status(403)
+          .json({ message: "Only the event creator can approve guest adds" });
+      }
+      const proposedUserId = String(req.params.proposedUserId);
+      const requests = ((event as any).guestAddRequests || []) as any[];
+      const request = requests.find(
+        (r: any) => String(r.proposedUserId) === proposedUserId,
+      );
+      if (!request) {
+        return res.status(404).json({ message: "Guest-add request not found" });
+      }
+
+      if (!event.invitedUsers) {
+        event.invitedUsers = [];
+      }
+      if (!event.invitedUsers.includes(proposedUserId)) {
+        event.invitedUsers.push(proposedUserId);
+      }
+      (event as any).guestAddRequests = requests.filter(
+        (r: any) => String(r.proposedUserId) !== proposedUserId,
+      );
+      await event.save();
+
+      notificationService.sendPushNotification({
+        userId: proposedUserId,
+        title: "You're invited",
+        body: `You've been invited to "${event.name}"`,
+        type: "event_invitation",
+        data: { eventId: event._id.toString(), eventName: event.name },
+      });
+      notificationService.sendPushNotification({
+        userId: String(request.requestedBy),
+        title: "Guest approved",
+        body: `${request.proposedUsername} was invited to "${event.name}"`,
+        type: "event_guest_add_approved",
+        data: { eventId: event._id.toString(), eventName: event.name },
+      });
+      socketService.emitToUser(String(event.createdBy), "events:refresh", {
+        reason: "guest_add_approved",
+        eventId: event._id.toString(),
+      });
+      socketService.emitToUser(String(request.requestedBy), "events:refresh", {
+        reason: "guest_add_approved",
+        eventId: event._id.toString(),
+      });
+
+      return res.status(200).json({
+        success: true,
+        invitedUsers: event.invitedUsers,
+        guestAddRequests: (event as any).guestAddRequests,
+      });
+    } catch (error) {
+      console.error("Error approving guest-add request:", error);
+      return res
+        .status(500)
+        .json({ message: "Error approving guest-add request" });
+    }
+  },
+);
+
+router.post(
+  "/:id/guest-add-request/:proposedUserId/deny",
+  async (req: Request, res: Response) => {
+    const currentUser = (req as any).user;
+    if (!currentUser?.id) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+    try {
+      const event = await Event.findById(req.params.id);
+      if (!event) {
+        return res.status(404).json({ message: "Event not found" });
+      }
+      if (String(event.createdBy) !== String(currentUser.id)) {
+        return res
+          .status(403)
+          .json({ message: "Only the event creator can deny guest adds" });
+      }
+      const proposedUserId = String(req.params.proposedUserId);
+      const requests = ((event as any).guestAddRequests || []) as any[];
+      const request = requests.find(
+        (r: any) => String(r.proposedUserId) === proposedUserId,
+      );
+      (event as any).guestAddRequests = requests.filter(
+        (r: any) => String(r.proposedUserId) !== proposedUserId,
+      );
+      await event.save();
+
+      if (request) {
+        notificationService.sendPushNotification({
+          userId: String(request.requestedBy),
+          title: "Guest suggestion declined",
+          body: `${request.proposedUsername} wasn't added to "${event.name}"`,
+          type: "event_guest_add_denied",
+          data: { eventId: event._id.toString(), eventName: event.name },
+        });
+        socketService.emitToUser(String(event.createdBy), "events:refresh", {
+          reason: "guest_add_denied",
+          eventId: event._id.toString(),
+        });
+        socketService.emitToUser(String(request.requestedBy), "events:refresh", {
+          reason: "guest_add_denied",
+          eventId: event._id.toString(),
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        guestAddRequests: (event as any).guestAddRequests,
+      });
+    } catch (error) {
+      console.error("Error denying guest-add request:", error);
+      return res.status(500).json({ message: "Error denying guest-add request" });
+    }
+  },
+);
+
 router.patch("/:id/roster", async (req: Request, res: Response) => {
   try {
     const eventId = req.params.id;
@@ -1932,7 +2364,10 @@ router.patch("/:id/roster", async (req: Request, res: Response) => {
     }
 
     if (playerAdded) {
-      if (event.rosterSpotsFilled < event.totalSpots) {
+      if (
+        isUnlimitedSpots(event.totalSpots) ||
+        event.rosterSpotsFilled < event.totalSpots
+      ) {
         event.rosterSpotsFilled += 1;
       }
     } else {
@@ -2093,6 +2528,121 @@ router.post("/:eventId/invite", async (req: Request, res: Response) => {
   } catch (error) {
     console.error("Error inviting users to event:", error);
     res.status(500).json({ message: "Failed to invite users" });
+  }
+});
+
+// Creator nudges invitees who haven't RSVP'd yet. Optional `userIds` limits
+// the ping to a subset; omit it to remind everyone still pending.
+router.post("/:eventId/ping-rsvp", async (req: Request, res: Response) => {
+  try {
+    const currentUser = (req as any).user;
+    if (!currentUser?.id) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+
+    const event = await Event.findById(req.params.eventId);
+    if (!event) {
+      return res.status(404).json({ message: "Event not found" });
+    }
+    if (String(event.createdBy) !== String(currentUser.id)) {
+      return res
+        .status(403)
+        .json({ message: "Only the event creator can send RSVP reminders" });
+    }
+
+    const invited = (event.invitedUsers || []).map(String);
+    const onRoster = new Set(
+      (event.roster || [])
+        .map((p: any) => (p.userId ? String(p.userId) : ""))
+        .filter(Boolean),
+    );
+    const responded = new Set(
+      (event.rsvps || []).map((r: any) => String(r.userId)),
+    );
+    const pending = invited.filter(
+      (id) =>
+        id !== String(currentUser.id) &&
+        !onRoster.has(id) &&
+        !responded.has(id),
+    );
+
+    const requested: string[] | null = Array.isArray(req.body?.userIds)
+      ? req.body.userIds.map(String).filter(Boolean)
+      : null;
+
+    const candidates = requested
+      ? pending.filter((id) => requested.includes(id))
+      : pending;
+
+    const skipped: Array<{ userId: string; reason: string }> = [];
+    if (requested) {
+      for (const id of requested) {
+        if (!invited.includes(id)) {
+          skipped.push({ userId: id, reason: "not_invited" });
+        } else if (onRoster.has(id) || responded.has(id)) {
+          skipped.push({ userId: id, reason: "already_responded" });
+        }
+      }
+    }
+
+    if (candidates.length === 0) {
+      return res.status(400).json({
+        message: "No pending invitees to remind",
+        pinged: [],
+        skipped,
+        rateLimited: [],
+      });
+    }
+
+    const since = new Date(Date.now() - RSVP_PING_COOLDOWN_MS);
+    const recent = await Notification.find({
+      userId: { $in: candidates },
+      type: "event_rsvp_reminder",
+      "data.eventId": event._id.toString(),
+      createdAt: { $gte: since },
+    })
+      .select("userId")
+      .lean();
+    const coolingDown = new Set(recent.map((n: any) => String(n.userId)));
+    const rateLimited = candidates.filter((id) => coolingDown.has(id));
+    const pinged = candidates.filter((id) => !coolingDown.has(id));
+
+    if (pinged.length === 0) {
+      return res.status(429).json({
+        message: "RSVP reminders were already sent recently. Try again later.",
+        pinged: [],
+        skipped,
+        rateLimited,
+      });
+    }
+
+    const creator = await User.findById(currentUser.id)
+      .select("username name")
+      .lean();
+    const creatorName =
+      (creator as any)?.name || (creator as any)?.username || "The host";
+
+    notificationService.sendPushNotificationToMany(
+      pinged,
+      "RSVP reminder",
+      `${creatorName} is waiting for your RSVP to "${event.name}"`,
+      "event_rsvp_reminder",
+      {
+        eventId: event._id.toString(),
+        eventName: event.name,
+        remindedBy: String(currentUser.id),
+      },
+    );
+
+    return res.status(200).json({
+      success: true,
+      pinged,
+      skipped,
+      rateLimited,
+    });
+  } catch (error) {
+    console.error("Error sending RSVP reminders:", error);
+    return res.status(500).json({ message: "Failed to send RSVP reminders" });
   }
 });
 

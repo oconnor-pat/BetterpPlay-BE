@@ -132,9 +132,13 @@ export type NotificationType =
   | "event_join"
   | "event_leave"
   | "event_rsvp"
+  | "event_rsvp_reminder"
   | "event_join_request"
   | "event_join_approved"
   | "event_join_denied"
+  | "event_guest_add_request"
+  | "event_guest_add_approved"
+  | "event_guest_add_denied"
   | "event_spot_available"
   | "event_waitlist_join"
   | "community_note"
@@ -201,6 +205,11 @@ export const sendPushNotification = async (
         case "event_reminder":
           if (!preferences.eventReminders) return false;
           break;
+        case "event_rsvp_reminder":
+          // Creator nudges reuse the reminders toggle — same class of
+          // "don't forget this event" ping as the scheduled 1h reminder.
+          if (!preferences.eventReminders) return false;
+          break;
         case "event_like":
         case "event_comment":
         case "event_join":
@@ -209,6 +218,9 @@ export const sendPushNotification = async (
         case "event_join_request":
         case "event_join_approved":
         case "event_join_denied":
+        case "event_guest_add_request":
+        case "event_guest_add_approved":
+        case "event_guest_add_denied":
           if (!preferences.eventActivity) return false;
           break;
         case "community_note":
@@ -394,6 +406,21 @@ export const registerDeviceToken = async (
       { userId, deviceToken, platform },
       { upsert: true, new: true },
     );
+
+    // One live token per platform. Reinstalls / TestFlight rebuilds mint a
+    // new FCM token while the old ones often keep delivering for a while,
+    // so leaving them around multiplies every push (a single DM becomes
+    // 3–6 tray banners on the same phone).
+    const samePlatform = await DeviceToken.find({ userId, platform })
+      .sort({ updatedAt: -1 })
+      .select("_id deviceToken");
+    if (samePlatform.length > 1) {
+      const staleIds = samePlatform.slice(1).map((t) => t._id);
+      await DeviceToken.deleteMany({ _id: { $in: staleIds } });
+      console.log(
+        `Pruned ${staleIds.length} stale ${platform} token(s) for user ${userId}`,
+      );
+    }
 
     // Create default notification preferences if they don't exist
     await NotificationPreferences.findOneAndUpdate(

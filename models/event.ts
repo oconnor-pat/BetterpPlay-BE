@@ -104,6 +104,29 @@ const JoinRequestSchema: Schema = new Schema(
   { _id: false },
 );
 
+// Invitees (or roster members) can ask the creator to invite someone else.
+// Creator approve → proposed user is added to invitedUsers; deny drops it.
+export interface IGuestAddRequest {
+  requestedBy: string;
+  requestedByUsername: string;
+  proposedUserId: string;
+  proposedUsername: string;
+  proposedProfilePicUrl?: string;
+  requestedAt: Date;
+}
+
+const GuestAddRequestSchema: Schema = new Schema(
+  {
+    requestedBy: { type: String, required: true },
+    requestedByUsername: { type: String, required: true },
+    proposedUserId: { type: String, required: true },
+    proposedUsername: { type: String, required: true },
+    proposedProfilePicUrl: { type: String, required: false },
+    requestedAt: { type: Date, default: Date.now },
+  },
+  { _id: false },
+);
+
 // Quick-access reactions shown before the user opens the full emoji picker.
 // This is a convenience shortlist, not a whitelist — any emoji is accepted.
 // "❤️" leads because it's what the old like button became, so migrated likes
@@ -147,9 +170,13 @@ export interface IEvent extends Document {
   waitlist: IWaitlistEntry[];
   rsvps: IRsvp[];
   joinRequests: IJoinRequest[];
+  guestAddRequests: IGuestAddRequest[];
   spotReservation?: ISpotReservation | null;
   latitude?: number;
   longitude?: number;
+  // When true, `location` is a free-text label (e.g. "Friday night gaming")
+  // rather than a physical address — no map, no lat/lng.
+  isVirtual?: boolean;
   jerseyColors?: string[];
   // Superseded by `reactions` — a like is now a "❤️" reaction. Kept on the
   // model so events written before the migration still read cleanly and so
@@ -158,16 +185,26 @@ export interface IEvent extends Document {
   reactions: IReaction[];
   privacy: "public" | "private" | "invite-only";
   invitedUsers: string[];
-  // Public-event creator controls. `allowJoinRequests` (default true) gates
-  // whether people can request to join a public event; when false the card
-  // shows "not accepting requests". `showLocationPublicly` (default false)
-  // lets the creator reveal the location/map on the public teaser instead of
-  // keeping it hidden until approval.
+  // Public-event creator controls. `allowJoinRequests` (default true) means
+  // strangers must request and wait for approval. When false, anyone can join
+  // the roster directly (open join). `showLocationPublicly` (default false)
+  // reveals the location/map on the public teaser before they're on the roster.
   allowJoinRequests?: boolean;
   showLocationPublicly?: boolean;
   isRecurring?: boolean;
   recurrenceGroupId?: string;
   recurrenceFrequency?: "weekly" | "biweekly" | "monthly";
+  // When true the series has no fixed end; we materialize a rolling
+  // horizon of occurrences (see INDEFINITE_RECURRENCE_HORIZON) rather
+  // than a user-picked count.
+  recurrenceIndefinite?: boolean;
+  // Absolute start instant (UTC). Used by the reminder scheduler so wall-clock
+  // date+time aren't misread as the server's local timezone (Heroku = UTC).
+  startsAt?: Date;
+  // Creator's `Date.getTimezoneOffset()` at write time — minutes to add to
+  // local wall clock to reach UTC. Lets us recompute startsAt if date/time
+  // change without a fresh client ISO.
+  timezoneOffsetMinutes?: number;
   // Optional reference to a venue listing the event was planned from. The
   // venue itself isn't stored in our DB — venueId is a Google Place ID.
   // venueName is cached so we can render a "Happening at X" badge without
@@ -199,6 +236,8 @@ const EventSchema: Schema = new Schema(
     time: { type: String, required: true },
     durationMinutes: { type: Number, min: 5, max: 24 * 60 },
     date: { type: String, required: true },
+    startsAt: { type: Date, required: false, index: true },
+    timezoneOffsetMinutes: { type: Number, required: false },
     totalSpots: { type: Number, required: true },
     rosterSpotsFilled: { type: Number, default: 0 },
     eventType: { type: String, required: true },
@@ -208,9 +247,11 @@ const EventSchema: Schema = new Schema(
     waitlist: { type: [WaitlistEntrySchema], default: [] },
     rsvps: { type: [RsvpSchema], default: [] },
     joinRequests: { type: [JoinRequestSchema], default: [] },
+    guestAddRequests: { type: [GuestAddRequestSchema], default: [] },
     spotReservation: { type: SpotReservationSchema, default: null },
     latitude: { type: Number, required: false },
     longitude: { type: Number, required: false },
+    isVirtual: { type: Boolean, default: false },
     jerseyColors: { type: [String], default: [] }, // Team colors (for sports events)
     likes: { type: [String], default: [] }, // Deprecated: mirrors "❤️" reactions
     reactions: { type: [ReactionSchema], default: [] },
@@ -229,6 +270,7 @@ const EventSchema: Schema = new Schema(
       enum: ["weekly", "biweekly", "monthly", null],
       default: null,
     },
+    recurrenceIndefinite: { type: Boolean, default: false },
     // Venue listing reference (Google Place ID + cached display fields).
     // Indexed because the venue detail page queries by venueId.
     venueId: { type: String, required: false, index: true },

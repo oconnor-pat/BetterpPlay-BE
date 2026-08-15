@@ -6,8 +6,92 @@ import Event from "../models/event";
 import notificationService from "../services/notificationService";
 import socketService from "../services/socketService";
 import blockService from "../services/blockService";
+import {
+  isValidEmoji,
+  MAX_DISTINCT_REACTIONS_PER_MESSAGE,
+  MAX_REACTIONS_PER_USER_PER_MESSAGE,
+} from "../utils/emoji";
 
 const router = Router();
+
+// Legacy "like" maps to a heart reaction; `likes` stays in sync for older clients.
+const LIKE_EMOJI = "❤️";
+
+type ReactionRow = { userId: string; emoji: string; reactedAt?: Date };
+
+const serializeReactions = (doc: any): { userId: string; emoji: string }[] => {
+  if (Array.isArray(doc?.reactions) && doc.reactions.length > 0) {
+    return doc.reactions.map((r: any) => ({
+      userId: String(r.userId),
+      emoji: r.emoji,
+    }));
+  }
+  // Pre-reactions data: synthesize hearts from the likes array.
+  return (doc?.likes || []).map((id: string) => ({
+    userId: String(id),
+    emoji: LIKE_EMOJI,
+  }));
+};
+
+const syncLikesFromReactions = (doc: any) => {
+  const reactions = (doc.reactions || []) as ReactionRow[];
+  doc.likes = reactions
+    .filter((r) => r.emoji === LIKE_EMOJI)
+    .map((r) => String(r.userId));
+};
+
+const resolveActorId = (req: Request): string | null => {
+  if (req.body?.userId) return String(req.body.userId);
+  const user = (req as any).user;
+  if (user?.id) return String(user.id);
+  return null;
+};
+
+const toggleReactionOnDoc = (
+  doc: any,
+  userId: string,
+  emoji: string,
+): { ok: true; added: boolean } | { ok: false; message: string } => {
+  if (!Array.isArray(doc.reactions)) {
+    doc.reactions = [];
+  }
+  // First write after the reactions ship: seed from legacy likes so we
+  // don't orphan existing hearts when someone reacts with a different emoji.
+  if (doc.reactions.length === 0 && Array.isArray(doc.likes) && doc.likes.length) {
+    doc.reactions = doc.likes.map((id: string) => ({
+      userId: String(id),
+      emoji: LIKE_EMOJI,
+      reactedAt: new Date(),
+    }));
+  }
+
+  const existing: ReactionRow[] = doc.reactions;
+  const index = existing.findIndex(
+    (r) => String(r.userId) === String(userId) && r.emoji === emoji,
+  );
+
+  if (index >= 0) {
+    existing.splice(index, 1);
+    syncLikesFromReactions(doc);
+    return { ok: true, added: false };
+  }
+
+  const distinct = new Set(existing.map((r) => r.emoji));
+  if (
+    !distinct.has(emoji) &&
+    distinct.size >= MAX_DISTINCT_REACTIONS_PER_MESSAGE
+  ) {
+    return { ok: false, message: "This comment has too many different reactions" };
+  }
+  const mine = existing.filter((r) => String(r.userId) === String(userId));
+  if (mine.length >= MAX_REACTIONS_PER_USER_PER_MESSAGE) {
+    return { ok: false, message: "You've added too many reactions" };
+  }
+
+  existing.push({ userId: String(userId), emoji, reactedAt: new Date() });
+  syncLikesFromReactions(doc);
+  return { ok: true, added: true };
+};
 
 router.get("/", async (req: Request, res: Response) => {
   try {
@@ -43,9 +127,11 @@ router.get("/", async (req: Request, res: Response) => {
       post.comments?.forEach((comment: any) => {
         if (comment.userId) userIds.add(String(comment.userId));
         comment.likes?.forEach((id: string) => userIds.add(String(id)));
+        comment.reactions?.forEach((r: any) => userIds.add(String(r.userId)));
         comment.replies?.forEach((reply: any) => {
           if (reply.userId) userIds.add(String(reply.userId));
           reply.likes?.forEach((id: string) => userIds.add(String(id)));
+          reply.reactions?.forEach((r: any) => userIds.add(String(r.userId)));
         });
       });
     });
@@ -99,6 +185,7 @@ router.get("/", async (req: Request, res: Response) => {
         ...post,
         profilePicUrl: postPic,
         likedByUsernames: getLikedByUsernames(post.likes),
+        reactions: serializeReactions(post),
         comments: post.comments?.map((comment: any) => {
           const commentUserId = String(comment.userId);
           const commentPic = userPicMap.get(commentUserId) || "";
@@ -106,6 +193,7 @@ router.get("/", async (req: Request, res: Response) => {
             ...comment,
             profilePicUrl: commentPic,
             likedByUsernames: getLikedByUsernames(comment.likes),
+            reactions: serializeReactions(comment),
             replies: comment.replies?.map((reply: any) => {
               const replyUserId = String(reply.userId);
               const replyPic = userPicMap.get(replyUserId) || "";
@@ -113,6 +201,7 @@ router.get("/", async (req: Request, res: Response) => {
                 ...reply,
                 profilePicUrl: replyPic,
                 likedByUsernames: getLikedByUsernames(reply.likes),
+                reactions: serializeReactions(reply),
               };
             }),
           };
@@ -171,9 +260,11 @@ router.get(
       (post as any).comments?.forEach((comment: any) => {
         if (comment.userId) userIds.add(String(comment.userId));
         comment.likes?.forEach((id: string) => userIds.add(String(id)));
+        comment.reactions?.forEach((r: any) => userIds.add(String(r.userId)));
         comment.replies?.forEach((reply: any) => {
           if (reply.userId) userIds.add(String(reply.userId));
           reply.likes?.forEach((id: string) => userIds.add(String(id)));
+          reply.reactions?.forEach((r: any) => userIds.add(String(r.userId)));
         });
       });
 
@@ -205,6 +296,7 @@ router.get(
         ...(post as any),
         profilePicUrl: userPicMap.get(String((post as any).userId)) || "",
         likedByUsernames: getLikedByUsernames((post as any).likes),
+        reactions: serializeReactions(post),
         comments: (post as any).comments?.map((comment: any) => {
           const commentUserId = String(comment.userId);
           const commentPic = userPicMap.get(commentUserId) || "";
@@ -212,6 +304,7 @@ router.get(
             ...comment,
             profilePicUrl: commentPic,
             likedByUsernames: getLikedByUsernames(comment.likes),
+            reactions: serializeReactions(comment),
             replies: comment.replies?.map((reply: any) => {
               const replyUserId = String(reply.userId);
               const replyPic = userPicMap.get(replyUserId) || "";
@@ -219,6 +312,7 @@ router.get(
                 ...reply,
                 profilePicUrl: replyPic,
                 likedByUsernames: getLikedByUsernames(reply.likes),
+                reactions: serializeReactions(reply),
               };
             }),
           };
@@ -321,7 +415,7 @@ router.post(
   "/:postId/comments",
   async (req: Request, res: Response) => {
     try {
-      const { text, userId, username } = req.body;
+      const { text, userId, username, replyToPost } = req.body;
       if (!text || !userId || !username) {
         return res.status(400).json({ message: "Missing required fields." });
       }
@@ -337,6 +431,7 @@ router.post(
         username,
         profilePicUrl,
         replies: [],
+        replyToPost: !!replyToPost,
       };
       post.comments.push(comment);
       await post.save();
@@ -444,7 +539,8 @@ router.post(
   "/:postId/comments/:commentId/replies",
   async (req: Request, res: Response) => {
     try {
-      const { text, userId, username } = req.body;
+      const { text, userId, username, replyToUsername, replyToReplyId } =
+        req.body;
       if (!text || !userId || !username) {
         return res.status(400).json({ message: "Missing required fields." });
       }
@@ -462,6 +558,8 @@ router.post(
         userId,
         username,
         profilePicUrl,
+        replyToUsername: replyToUsername || null,
+        replyToReplyId: replyToReplyId || null,
       });
       await post.save();
 
@@ -546,22 +644,22 @@ router.post(
   "/:postId/like",
   async (req: Request, res: Response) => {
     try {
-      const { userId } = req.body;
+      const userId = resolveActorId(req);
       if (!userId) {
         return res.status(400).json({ message: "Missing userId." });
       }
       const post = await communityNote.findById(req.params.postId);
       if (!post) return res.status(404).json({ message: "Post not found." });
 
-      const likeIndex = post.likes.indexOf(userId);
-      if (likeIndex === -1) {
-        post.likes.push(userId);
-      } else {
-        post.likes.splice(likeIndex, 1);
+      const result = toggleReactionOnDoc(post, userId, LIKE_EMOJI);
+      if (!result.ok) {
+        return res.status(400).json({ message: result.message });
       }
+      post.markModified("reactions");
+      post.markModified("likes");
       await post.save();
 
-      if (likeIndex === -1 && post.userId && post.userId !== userId) {
+      if (result.added && post.userId && post.userId !== userId) {
         const liker = await User.findById(userId).select("username");
         if (liker) {
           notificationService.sendPushNotification({
@@ -578,7 +676,8 @@ router.post(
         }
       }
 
-      const likerIds = post.likes.map((id: string) => {
+      const reactions = serializeReactions(post);
+      const likerIds = (post.likes || []).map((id: string) => {
         try {
           return new mongoose.Types.ObjectId(id);
         } catch {
@@ -588,7 +687,7 @@ router.post(
       const likers = await User.find({ _id: { $in: likerIds } })
         .select("username")
         .lean();
-      const likedByUsernames = post.likes
+      const likedByUsernames = (post.likes || [])
         .map((id: string) => {
           const user = likers.find((u: any) => u._id.toString() === String(id));
           return user?.username;
@@ -601,11 +700,75 @@ router.post(
         comments: post.comments,
         likes: post.likes,
         likedByUsernames,
+        reactions,
       });
 
-      res.status(200).json({ likes: post.likes, likedByUsernames });
+      res.status(200).json({ likes: post.likes, likedByUsernames, reactions });
     } catch (error) {
       res.status(500).json({ message: "Failed to toggle like on post." });
+    }
+  },
+);
+
+router.post(
+  "/:postId/react",
+  async (req: Request, res: Response) => {
+    try {
+      const userId = resolveActorId(req);
+      if (!userId) {
+        return res.status(400).json({ message: "Missing userId." });
+      }
+      if (!isValidEmoji(req.body?.emoji)) {
+        return res.status(400).json({ message: "Invalid reaction" });
+      }
+      const emoji = String(req.body.emoji).trim();
+
+      const post = await communityNote.findById(req.params.postId);
+      if (!post) return res.status(404).json({ message: "Post not found." });
+
+      const result = toggleReactionOnDoc(post, userId, emoji);
+      if (!result.ok) {
+        return res.status(400).json({ message: result.message });
+      }
+      post.markModified("reactions");
+      post.markModified("likes");
+      await post.save();
+
+      if (result.added && post.userId && String(post.userId) !== userId) {
+        const reactor = await User.findById(userId).select("username");
+        if (reactor) {
+          notificationService.sendPushNotification({
+            userId: post.userId,
+            title: "Someone reacted to your discussion",
+            body: `${reactor.username} reacted ${emoji} to your post`,
+            type: "community_note",
+            data: {
+              postId: post._id.toString(),
+              eventId: post.eventId || "",
+              eventName: post.eventName || "",
+            },
+          });
+        }
+      }
+
+      const reactions = serializeReactions(post);
+      const likedByUsernames: string[] = [];
+      socketService.emitToEvent(post.eventId || "", "comments:updated", {
+        postId: post._id.toString(),
+        eventId: post.eventId || "",
+        comments: post.comments,
+        likes: post.likes,
+        reactions,
+      });
+
+      res.status(200).json({
+        reactions,
+        likes: post.likes || [],
+        likedByUsernames,
+      });
+    } catch (error) {
+      console.error("Failed to toggle post reaction:", error);
+      res.status(500).json({ message: "Failed to toggle reaction on post." });
     }
   },
 );
@@ -614,7 +777,7 @@ router.post(
   "/:postId/comments/:commentId/like",
   async (req: Request, res: Response) => {
     try {
-      const { userId } = req.body;
+      const userId = resolveActorId(req);
       if (!userId) {
         return res.status(400).json({ message: "Missing userId." });
       }
@@ -624,15 +787,16 @@ router.post(
       if (!comment)
         return res.status(404).json({ message: "Comment not found." });
 
-      const likeIndex = comment.likes.indexOf(userId);
-      if (likeIndex === -1) {
-        comment.likes.push(userId);
-      } else {
-        comment.likes.splice(likeIndex, 1);
+      const result = toggleReactionOnDoc(comment, userId, LIKE_EMOJI);
+      if (!result.ok) {
+        return res.status(400).json({ message: result.message });
       }
+      comment.markModified("reactions");
+      comment.markModified("likes");
+      post.markModified("comments");
       await post.save();
 
-      if (likeIndex === -1 && comment.userId && comment.userId !== userId) {
+      if (result.added && comment.userId && comment.userId !== userId) {
         const liker = await User.findById(userId).select("username");
         if (liker) {
           notificationService.sendPushNotification({
@@ -649,7 +813,8 @@ router.post(
         }
       }
 
-      const likerIds = comment.likes.map((id: string) => {
+      const reactions = serializeReactions(comment);
+      const likerIds = (comment.likes || []).map((id: string) => {
         try {
           return new mongoose.Types.ObjectId(id);
         } catch {
@@ -659,7 +824,7 @@ router.post(
       const likers = await User.find({ _id: { $in: likerIds } })
         .select("username")
         .lean();
-      const likedByUsernames = comment.likes
+      const likedByUsernames = (comment.likes || [])
         .map((id: string) => {
           const user = likers.find((u: any) => u._id.toString() === String(id));
           return user?.username;
@@ -672,9 +837,73 @@ router.post(
         comments: post.comments,
       });
 
-      res.status(200).json({ likes: comment.likes, likedByUsernames });
+      res.status(200).json({
+        likes: comment.likes,
+        likedByUsernames,
+        reactions,
+      });
     } catch (error) {
       res.status(500).json({ message: "Failed to toggle like on comment." });
+    }
+  },
+);
+
+router.post(
+  "/:postId/comments/:commentId/react",
+  async (req: Request, res: Response) => {
+    try {
+      const userId = resolveActorId(req);
+      if (!userId) {
+        return res.status(400).json({ message: "Missing userId." });
+      }
+      if (!isValidEmoji(req.body?.emoji)) {
+        return res.status(400).json({ message: "Invalid reaction" });
+      }
+      const emoji = String(req.body.emoji).trim();
+
+      const post = await communityNote.findById(req.params.postId);
+      if (!post) return res.status(404).json({ message: "Post not found." });
+      const comment = post.comments.id(req.params.commentId);
+      if (!comment)
+        return res.status(404).json({ message: "Comment not found." });
+
+      const result = toggleReactionOnDoc(comment, userId, emoji);
+      if (!result.ok) {
+        return res.status(400).json({ message: result.message });
+      }
+      comment.markModified("reactions");
+      comment.markModified("likes");
+      post.markModified("comments");
+      await post.save();
+
+      if (result.added && comment.userId && String(comment.userId) !== userId) {
+        const reactor = await User.findById(userId).select("username");
+        if (reactor) {
+          notificationService.sendPushNotification({
+            userId: comment.userId,
+            title: "Someone reacted to your comment",
+            body: `${reactor.username} reacted ${emoji} to your comment`,
+            type: "community_note",
+            data: {
+              postId: post._id.toString(),
+              eventId: post.eventId || "",
+              eventName: post.eventName || "",
+            },
+          });
+        }
+      }
+
+      const reactions = serializeReactions(comment);
+      socketService.emitToEvent(post.eventId || "", "comments:updated", {
+        postId: post._id.toString(),
+        eventId: post.eventId || "",
+        comments: post.comments,
+      });
+
+      res.status(200).json({ reactions, likes: comment.likes || [] });
+    } catch (error) {
+      console.error("Failed to toggle comment reaction:", error);
+      res.status(500).json({ message: "Failed to toggle reaction on comment." });
     }
   },
 );
@@ -683,7 +912,7 @@ router.post(
   "/:postId/comments/:commentId/replies/:replyId/like",
   async (req: Request, res: Response) => {
     try {
-      const { userId } = req.body;
+      const userId = resolveActorId(req);
       if (!userId) {
         return res.status(400).json({ message: "Missing userId." });
       }
@@ -695,15 +924,16 @@ router.post(
       const reply = comment.replies.id(req.params.replyId);
       if (!reply) return res.status(404).json({ message: "Reply not found." });
 
-      const likeIndex = reply.likes.indexOf(userId);
-      if (likeIndex === -1) {
-        reply.likes.push(userId);
-      } else {
-        reply.likes.splice(likeIndex, 1);
+      const result = toggleReactionOnDoc(reply, userId, LIKE_EMOJI);
+      if (!result.ok) {
+        return res.status(400).json({ message: result.message });
       }
+      reply.markModified("reactions");
+      reply.markModified("likes");
+      post.markModified("comments");
       await post.save();
 
-      if (likeIndex === -1 && reply.userId && reply.userId !== userId) {
+      if (result.added && reply.userId && reply.userId !== userId) {
         const liker = await User.findById(userId).select("username");
         if (liker) {
           notificationService.sendPushNotification({
@@ -720,7 +950,8 @@ router.post(
         }
       }
 
-      const likerIds = reply.likes.map((id: string) => {
+      const reactions = serializeReactions(reply);
+      const likerIds = (reply.likes || []).map((id: string) => {
         try {
           return new mongoose.Types.ObjectId(id);
         } catch {
@@ -730,7 +961,7 @@ router.post(
       const likers = await User.find({ _id: { $in: likerIds } })
         .select("username")
         .lean();
-      const likedByUsernames = reply.likes
+      const likedByUsernames = (reply.likes || [])
         .map((id: string) => {
           const user = likers.find((u: any) => u._id.toString() === String(id));
           return user?.username;
@@ -743,9 +974,75 @@ router.post(
         comments: post.comments,
       });
 
-      res.status(200).json({ likes: reply.likes, likedByUsernames });
+      res.status(200).json({
+        likes: reply.likes,
+        likedByUsernames,
+        reactions,
+      });
     } catch (error) {
       res.status(500).json({ message: "Failed to toggle like on reply." });
+    }
+  },
+);
+
+router.post(
+  "/:postId/comments/:commentId/replies/:replyId/react",
+  async (req: Request, res: Response) => {
+    try {
+      const userId = resolveActorId(req);
+      if (!userId) {
+        return res.status(400).json({ message: "Missing userId." });
+      }
+      if (!isValidEmoji(req.body?.emoji)) {
+        return res.status(400).json({ message: "Invalid reaction" });
+      }
+      const emoji = String(req.body.emoji).trim();
+
+      const post = await communityNote.findById(req.params.postId);
+      if (!post) return res.status(404).json({ message: "Post not found." });
+      const comment = post.comments.id(req.params.commentId);
+      if (!comment)
+        return res.status(404).json({ message: "Comment not found." });
+      const reply = comment.replies.id(req.params.replyId);
+      if (!reply) return res.status(404).json({ message: "Reply not found." });
+
+      const result = toggleReactionOnDoc(reply, userId, emoji);
+      if (!result.ok) {
+        return res.status(400).json({ message: result.message });
+      }
+      reply.markModified("reactions");
+      reply.markModified("likes");
+      post.markModified("comments");
+      await post.save();
+
+      if (result.added && reply.userId && String(reply.userId) !== userId) {
+        const reactor = await User.findById(userId).select("username");
+        if (reactor) {
+          notificationService.sendPushNotification({
+            userId: reply.userId,
+            title: "Someone reacted to your reply",
+            body: `${reactor.username} reacted ${emoji} to your reply`,
+            type: "community_note",
+            data: {
+              postId: post._id.toString(),
+              eventId: post.eventId || "",
+              eventName: post.eventName || "",
+            },
+          });
+        }
+      }
+
+      const reactions = serializeReactions(reply);
+      socketService.emitToEvent(post.eventId || "", "comments:updated", {
+        postId: post._id.toString(),
+        eventId: post.eventId || "",
+        comments: post.comments,
+      });
+
+      res.status(200).json({ reactions, likes: reply.likes || [] });
+    } catch (error) {
+      console.error("Failed to toggle reply reaction:", error);
+      res.status(500).json({ message: "Failed to toggle reaction on reply." });
     }
   },
 );

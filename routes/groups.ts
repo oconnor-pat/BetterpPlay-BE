@@ -248,6 +248,56 @@ router.get("/mine", async (req: Request, res: Response) => {
   }
 });
 
+// GET /groups/unread-count — how many group threads need attention.
+// Same "threads not messages" semantics as the DM badge: the tab shows
+// how many conversations are waiting, not how many lines were sent.
+router.get("/unread-count", async (req: Request, res: Response) => {
+  const userId = requireUserId(req, res);
+  if (!userId) return;
+
+  try {
+    const groups = await Group.find({ "members.userId": userId })
+      .select("_id")
+      .lean();
+    const groupIds = groups.map((g: any) => String(g._id));
+    if (groupIds.length === 0) {
+      return res
+        .status(200)
+        .json({ success: true, unreadGroups: 0, unreadMessages: 0 });
+    }
+
+    const reads = await GroupRead.find({
+      userId,
+      groupId: { $in: groupIds },
+    }).lean();
+    const lastReadByGroup = new Map<string, Date>(
+      reads.map((r: any) => [String(r.groupId), r.lastReadAt]),
+    );
+
+    let unreadGroups = 0;
+    let unreadMessages = 0;
+    await Promise.all(
+      groupIds.map(async (gid) => {
+        const since = lastReadByGroup.get(gid);
+        const query: any = { groupId: gid, userId: { $ne: userId } };
+        if (since) query.createdAt = { $gt: since };
+        const count = await GroupMessage.countDocuments(query);
+        if (count > 0) {
+          unreadGroups += 1;
+          unreadMessages += count;
+        }
+      }),
+    );
+
+    return res
+      .status(200)
+      .json({ success: true, unreadGroups, unreadMessages });
+  } catch (err) {
+    console.error("Failed to fetch group unread count:", err);
+    return res.status(500).json({ message: "Failed to fetch unread count" });
+  }
+});
+
 // GET /groups/:id — single group detail. Members-only by default; public
 // groups will be readable by anyone in the future once discovery ships.
 router.get("/:id", async (req: Request, res: Response) => {
@@ -815,25 +865,51 @@ router.post("/:id/messages", async (req: Request, res: Response) => {
       { upsert: true, setDefaultsOnInsert: true },
     );
 
-    // Live thread update for anyone with the chat open.
-    socketService.emitToGroup(String(group._id), "group:message:new", message);
-
-    // Badge/list update for every member's other surfaces (Groups tab).
+    // Live thread update — personalized per member so blocked senders
+    // arrive already redacted (same shape as the HTTP history endpoint).
+    // Emitting to user rooms (not the group room) lets us vary the
+    // payload; every connected client is already in `user:{id}`.
     const memberIds = (group.members as IGroupMember[]).map((m) =>
       String(m.userId),
     );
-    const activity = {
+    const hiddenWithSender = await blockService.getHiddenUserIds(userId);
+    const fullMessage = message;
+    const redactedMessage = serializeMessage(created, new Set([userId]));
+    for (const memberId of memberIds) {
+      socketService.emitToUser(
+        memberId,
+        "group:message:new",
+        hiddenWithSender.has(memberId) ? redactedMessage : fullMessage,
+      );
+    }
+
+    // Badge/list update for every member's other surfaces (Groups tab).
+    // Recipients who hide the sender get a redacted preview so the list
+    // row doesn't leak message text.
+    const activityBase = {
       groupId: String(group._id),
       senderId: userId,
-      lastMessage: serializeLastMessage(created),
     };
-    socketService.emitToUsers(memberIds, "group:activity", activity);
+    const lastFull = serializeLastMessage(created);
+    const lastRedacted = lastFull
+      ? {...lastFull, text: "", hasImage: false, deleted: false}
+      : null;
+    for (const memberId of memberIds) {
+      socketService.emitToUser(memberId, "group:activity", {
+        ...activityBase,
+        lastMessage: hiddenWithSender.has(memberId)
+          ? lastRedacted
+          : lastFull,
+      });
+    }
 
     // Push to members who aren't the sender and aren't actively watching
-    // the thread (those get the live socket update instead).
+    // the thread (those get the live socket update instead). Skip anyone
+    // in a mutual block with the sender.
     const inRoom = await socketService.getUserIdsInGroupRoom(String(group._id));
     const pushTargets = memberIds.filter(
-      (id) => id !== userId && !inRoom.has(id),
+      (id) =>
+        id !== userId && !inRoom.has(id) && !hiddenWithSender.has(id),
     );
     if (pushTargets.length > 0) {
       const senderName =
