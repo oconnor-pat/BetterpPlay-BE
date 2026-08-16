@@ -3,6 +3,12 @@ import mongoose from "mongoose";
 import User from "../models/user";
 import Event from "../models/event";
 import blockService from "../services/blockService";
+import {
+  normalizeUsername,
+  renameUser,
+  validateDisplayName,
+  validateUsername,
+} from "../services/usernameService";
 
 const router = Router();
 
@@ -50,6 +56,81 @@ router.put("/users/me/location", async (req: Request, res: Response) => {
   } catch (error) {
     console.error("Failed to update location:", error);
     return res.status(500).json({ message: "Failed to update location" });
+  }
+});
+
+router.put("/users/me/profile", async (req: Request, res: Response) => {
+  try {
+    const currentUser = (req as any).user;
+    if (!currentUser || !currentUser.id) {
+      return res.status(401).json({
+        success: false,
+        message: "Authentication required",
+      });
+    }
+
+    const { name, username } = req.body as {
+      name?: string;
+      username?: string;
+    };
+
+    if (name === undefined && username === undefined) {
+      return res.status(400).json({
+        success: false,
+        message: "Provide a name and/or username to update",
+      });
+    }
+
+    const user = await User.findById(currentUser.id);
+    if (!user) {
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
+    }
+
+    if (name !== undefined) {
+      const nameError = validateDisplayName(String(name));
+      if (nameError) {
+        return res.status(400).json({ success: false, message: nameError });
+      }
+      user.name = String(name).trim();
+    }
+
+    if (username !== undefined) {
+      const nextUsername = normalizeUsername(String(username));
+      const usernameError = validateUsername(nextUsername);
+      if (usernameError) {
+        return res.status(400).json({ success: false, message: usernameError });
+      }
+      if (nextUsername !== user.username) {
+        try {
+          await renameUser(String(user._id), user.username, nextUsername);
+          user.username = nextUsername;
+        } catch (err: any) {
+          if (err?.message === "USERNAME_TAKEN") {
+            return res.status(409).json({
+              success: false,
+              message: "Username already in use",
+            });
+          }
+          throw err;
+        }
+      }
+    }
+
+    await user.save();
+
+    const refreshed = await User.findById(user._id).select("-password");
+    return res.status(200).json({
+      success: true,
+      user: refreshed,
+    });
+  } catch (error) {
+    console.error("Failed to update profile:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update profile",
+    });
   }
 });
 

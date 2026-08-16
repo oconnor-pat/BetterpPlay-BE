@@ -4,7 +4,11 @@ export interface IUser extends Document {
   name: string;
   email: string;
   username: string;
-  password: string;
+  /** Optional for Apple/Google-only accounts. */
+  password?: string;
+  appleId?: string;
+  googleId?: string;
+  authProviders: string[];
   profilePicUrl: string;
   tokenVersion: number;
   isAdmin: boolean;
@@ -24,7 +28,10 @@ const UserSchema: Schema = new Schema(
     name: { type: String, required: true },
     email: { type: String, required: true },
     username: { type: String, required: true },
-    password: { type: String, required: true },
+    password: { type: String, required: false },
+    appleId: { type: String, sparse: true, unique: true },
+    googleId: { type: String, sparse: true, unique: true },
+    authProviders: { type: [String], default: [] },
     profilePicUrl: { type: String }, // URL of the user's profile picture stored in S3
     tokenVersion: { type: Number, default: 0 }, // Increment to invalidate all tokens
     isAdmin: { type: Boolean, default: false }, // Admin flag for venue management

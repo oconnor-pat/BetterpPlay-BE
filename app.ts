@@ -10,6 +10,7 @@ import eventReminderService from "./services/eventReminderService";
 import healthRoutes from "./routes/health";
 import notificationRoutes from "./routes/notifications";
 import eventRoutes from "./routes/events";
+import eventRatingRoutes from "./routes/eventRatings";
 import authRoutes from "./routes/auth";
 import userRoutes from "./routes/users";
 import friendRoutes from "./routes/friends";
@@ -19,6 +20,7 @@ import groupRoutes from "./routes/groups";
 import dmRoutes from "./routes/dm";
 import blockRoutes from "./routes/blocks";
 import reportRoutes from "./routes/reports";
+import playerRatingRoutes from "./routes/playerRatings";
 
 const app: Application = express();
 const httpServer = createServer(app);
@@ -57,6 +59,8 @@ app.use(async (req: Request, res: Response, next: Function) => {
 
 app.use(healthRoutes);
 app.use("/api/notifications", notificationRoutes);
+// Rating routes before /events so /ratings/pending isn't captured by /:id
+app.use("/events", eventRatingRoutes);
 app.use("/events", eventRoutes);
 app.use(authRoutes);
 app.use(userRoutes);
@@ -69,6 +73,7 @@ app.use("/dm", dmRoutes);
 // friend routes they mirror, and reports use /reports and /admin/reports.
 app.use(blockRoutes);
 app.use(reportRoutes);
+app.use(playerRatingRoutes);
 
 const PORT = process.env.PORT || 8001;
 

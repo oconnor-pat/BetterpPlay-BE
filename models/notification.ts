@@ -17,6 +17,7 @@ export interface INotification extends Document {
     | "event_leave"
     | "event_rsvp"
     | "event_rsvp_reminder"
+    | "event_rating_prompt"
     | "event_join_request"
     | "event_join_approved"
     | "event_join_denied"
@@ -73,6 +74,7 @@ const NotificationSchema: Schema = new Schema(
         "event_leave",
         "event_rsvp",
         "event_rsvp_reminder",
+        "event_rating_prompt",
         "event_join_request",
         "event_join_approved",
         "event_join_denied",

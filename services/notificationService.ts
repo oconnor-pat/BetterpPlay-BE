@@ -133,6 +133,7 @@ export type NotificationType =
   | "event_leave"
   | "event_rsvp"
   | "event_rsvp_reminder"
+  | "event_rating_prompt"
   | "event_join_request"
   | "event_join_approved"
   | "event_join_denied"
@@ -208,6 +209,9 @@ export const sendPushNotification = async (
         case "event_rsvp_reminder":
           // Creator nudges reuse the reminders toggle — same class of
           // "don't forget this event" ping as the scheduled 1h reminder.
+          if (!preferences.eventReminders) return false;
+          break;
+        case "event_rating_prompt":
           if (!preferences.eventReminders) return false;
           break;
         case "event_like":

@@ -193,7 +193,41 @@ export const resolveEventStartsAt = (input: {
   );
 };
 
+/** Assumed length when duration is missing/open-ended (matches FE). */
+export const ASSUMED_EVENT_DURATION_MS = 3 * 60 * 60 * 1000;
+
+export const resolveEventEndsAt = (input: {
+  startsAt?: string | Date | null;
+  date?: string;
+  time?: string;
+  timezoneOffsetMinutes?: number | null;
+  durationMinutes?: number | null;
+  timeZone?: string;
+}): Date | null => {
+  const start = resolveEventStartsAt(input);
+  if (!start) {
+    return null;
+  }
+  const minutes = input.durationMinutes;
+  const durationMs =
+    typeof minutes === "number" && minutes > 0
+      ? minutes * 60 * 1000
+      : ASSUMED_EVENT_DURATION_MS;
+  return new Date(start.getTime() + durationMs);
+};
+
+export const isEventEnded = (
+  input: Parameters<typeof resolveEventEndsAt>[0],
+  nowMs: number = Date.now(),
+): boolean => {
+  const end = resolveEventEndsAt(input);
+  return end ? end.getTime() <= nowMs : false;
+};
+
 export default {
   resolveEventStartsAt,
+  resolveEventEndsAt,
+  isEventEnded,
   wallTimeInZoneToUtc,
+  ASSUMED_EVENT_DURATION_MS,
 };

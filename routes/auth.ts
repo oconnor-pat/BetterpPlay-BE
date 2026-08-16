@@ -6,6 +6,11 @@ import nodemailer from "nodemailer";
 import User from "../models/user";
 import Event from "../models/event";
 import communityNote from "../models/communityNote";
+import {
+  findOrCreateSocialUser,
+  SocialProvider,
+  verifySocialIdToken,
+} from "../services/socialAuthService";
 
 const router = Router();
 
@@ -69,7 +74,10 @@ router.post(
     try {
       const { name, email, username, password } = req.body;
 
-      const emailAlreadyExists = await User.findOne({ email });
+      const normalizedEmail =
+        typeof email === "string" ? email.toLowerCase().trim() : email;
+
+      const emailAlreadyExists = await User.findOne({ email: normalizedEmail });
       const usernameAlreadyExists = await User.findOne({ username });
 
       if (emailAlreadyExists) {
@@ -87,9 +95,10 @@ router.post(
       const hashedPassword = await bcrypt.hash(password, 10);
       const newUser = await User.create({
         name,
-        email,
+        email: normalizedEmail,
         username,
         password: hashedPassword,
+        authProviders: ["password"],
       });
 
       const token = jwt.sign(
@@ -115,6 +124,13 @@ router.post("/auth/login", async (req: Request, res: Response) => {
       return res.status(404).json({ message: "User not found" });
     }
 
+    if (!user.password) {
+      const providers = (user.authProviders || []).join(" / ") || "Apple or Google";
+      return res.status(401).json({
+        message: `This account uses ${providers} Sign-In. Continue with that instead, or reset your password to add one.`,
+      });
+    }
+
     const passwordMatch = await bcrypt.compare(password, user.password);
     if (!passwordMatch) {
       return res.status(401).json({ message: "Incorrect password" });
@@ -129,6 +145,219 @@ router.post("/auth/login", async (req: Request, res: Response) => {
     return res
       .status(500)
       .json({ message: "Failed to process the login request" });
+  }
+});
+
+/**
+ * Apple / Google Sign-In. Client sends a provider identity token; we verify
+ * it server-side, link or create the user, and return the same JWT shape as
+ * password login.
+ */
+router.post("/auth/social", async (req: Request, res: Response) => {
+  try {
+    const { provider, idToken, name } = req.body as {
+      provider?: string;
+      idToken?: string;
+      name?: string;
+    };
+
+    if (
+      provider !== "apple" &&
+      provider !== "google"
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "provider must be 'apple' or 'google'",
+      });
+    }
+    if (!idToken || typeof idToken !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: "idToken is required",
+      });
+    }
+
+    const identity = await verifySocialIdToken(
+      provider as SocialProvider,
+      idToken,
+    );
+    const { user, isNew } = await findOrCreateSocialUser(identity, name);
+
+    const token = jwt.sign(
+      { id: user._id, tokenVersion: user.tokenVersion },
+      getJwtSecret(),
+    );
+
+    const isPrivateRelay = /@privaterelay\.appleid\.com$/i.test(
+      user.email || "",
+    );
+
+    return res.status(isNew ? 201 : 200).json({
+      success: true,
+      isNew,
+      suggestLink: isNew,
+      isPrivateRelay,
+      user,
+      token,
+    });
+  } catch (error: any) {
+    const message = error?.message || "Social sign-in failed";
+    if (typeof message === "string" && message.startsWith("EMAIL_REQUIRED")) {
+      return res.status(400).json({
+        success: false,
+        message: message.replace(/^EMAIL_REQUIRED:\s*/, ""),
+      });
+    }
+    console.error("Error in /auth/social:", error);
+    // Surface configuration / audience problems clearly during setup.
+    if (
+      typeof message === "string" &&
+      (message.includes("GOOGLE_CLIENT_IDS") ||
+        message.includes("Wrong recipient") ||
+        message.includes("audience") ||
+        message.includes("Token used too late") ||
+        message.includes("Invalid token signature"))
+    ) {
+      return res.status(401).json({
+        success: false,
+        message,
+      });
+    }
+    return res.status(401).json({
+      success: false,
+      message: "Could not verify social sign-in. Please try again.",
+      detail: process.env.NODE_ENV !== "production" ? message : undefined,
+    });
+  }
+});
+
+/**
+ * Merge the currently authenticated (usually new social) account into an
+ * existing password account. Used when Apple Hide My Email created a
+ * separate user that should have linked by real email.
+ */
+router.post("/auth/link-account", async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) {
+      return res
+        .status(401)
+        .json({ success: false, message: "No token provided" });
+    }
+
+    const token = authHeader.split(" ")[1];
+    const decoded = jwt.verify(token, getJwtSecret()) as {
+      id: string;
+      tokenVersion?: number;
+    };
+
+    const { username, password } = req.body as {
+      username?: string;
+      password?: string;
+    };
+    if (!username || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "Username and password are required",
+      });
+    }
+
+    const orphan = await User.findById(decoded.id);
+    if (!orphan) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Current user not found" });
+    }
+    if (
+      decoded.tokenVersion !== undefined &&
+      decoded.tokenVersion !== orphan.tokenVersion
+    ) {
+      return res.status(401).json({
+        success: false,
+        message: "Token has been invalidated. Please sign in again.",
+      });
+    }
+
+    const target = await User.findOne({ username });
+    if (!target) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Account not found" });
+    }
+    if (!target.password) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "That account has no password. Sign in with Apple/Google on it, or reset a password first.",
+      });
+    }
+
+    const passwordMatch = await bcrypt.compare(password, target.password);
+    if (!passwordMatch) {
+      return res
+        .status(401)
+        .json({ success: false, message: "Incorrect password" });
+    }
+
+    if (String(orphan._id) === String(target._id)) {
+      return res.status(400).json({
+        success: false,
+        message: "You are already on that account",
+      });
+    }
+
+    if (orphan.appleId) {
+      if (target.appleId && target.appleId !== orphan.appleId) {
+        return res.status(409).json({
+          success: false,
+          message: "That account is already linked to a different Apple ID",
+        });
+      }
+      target.appleId = orphan.appleId;
+    }
+    if (orphan.googleId) {
+      if (target.googleId && target.googleId !== orphan.googleId) {
+        return res.status(409).json({
+          success: false,
+          message: "That account is already linked to a different Google account",
+        });
+      }
+      target.googleId = orphan.googleId;
+    }
+
+    const providers = new Set([
+      ...(target.authProviders || []),
+      ...(orphan.authProviders || []),
+    ]);
+    if (target.password) {
+      providers.add("password");
+    }
+    target.authProviders = [...providers];
+    await target.save();
+
+    // Clear provider ids on orphan before delete so unique indexes stay clean.
+    orphan.appleId = undefined;
+    orphan.googleId = undefined;
+    await orphan.save();
+    await User.deleteOne({ _id: orphan._id });
+
+    const newToken = jwt.sign(
+      { id: target._id, tokenVersion: target.tokenVersion },
+      getJwtSecret(),
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Accounts linked successfully",
+      user: target,
+      token: newToken,
+    });
+  } catch (error) {
+    console.error("Error in /auth/link-account:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to link accounts. Please try again.",
+    });
   }
 });
 
@@ -206,6 +435,14 @@ router.put("/auth/change-password", async (req: Request, res: Response) => {
       return res
         .status(404)
         .json({ success: false, message: "User not found" });
+    }
+
+    if (!user.password) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "This account has no password yet. Use forgot password to set one, or continue with Apple/Google Sign-In.",
+      });
     }
 
     const passwordMatch = await bcrypt.compare(currentPassword, user.password);

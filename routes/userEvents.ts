@@ -2,6 +2,8 @@ import { Router, Request, Response } from "express";
 import mongoose from "mongoose";
 import Event from "../models/event";
 import User from "../models/user";
+import { aggregateHostRatings } from "../services/ratingService";
+import { aggregatePlayerRatings } from "../services/ratingService";
 
 const router = Router();
 
@@ -120,10 +122,19 @@ router.get("/user/:id/events/stats", async (req: Request, res: Response) => {
       createdBy: { $ne: userId },
     });
 
+    const hostRatings = await aggregateHostRatings([userId]);
+    const host = hostRatings.get(userId) || { average: 0, count: 0 };
+    const playerRatings = await aggregatePlayerRatings([userId]);
+    const player = playerRatings.get(userId) || { average: 0, count: 0 };
+
     return res.status(200).json({
       success: true,
       created: createdCount,
       joined: joinedCount,
+      hostRatingAverage: host.count > 0 ? host.average : null,
+      hostRatingCount: host.count,
+      playerRatingAverage: player.count > 0 ? player.average : null,
+      playerRatingCount: player.count,
     });
   } catch (error) {
     console.error("Error fetching event stats:", error);
