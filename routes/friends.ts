@@ -1,8 +1,11 @@
 import { Router, Request, Response } from "express";
+import mongoose from "mongoose";
 import User from "../models/user";
 import Event from "../models/event";
 import notificationService from "../services/notificationService";
 import blockService from "../services/blockService";
+
+const { getHiddenUserIds, isBlockedBetween } = blockService;
 
 const router = Router();
 
@@ -409,5 +412,88 @@ router.get("/users/:userId/friend-status", async (req: Request, res: Response) =
     return res.status(500).json({ message: "Failed to get friend status" });
   }
 });
+
+// Mutual friends between the viewer and another user (count + small preview).
+router.get(
+  "/users/:userId/mutual-friends",
+  async (req: Request, res: Response) => {
+    try {
+      const viewer = (req as any).user;
+      if (!viewer?.id) {
+        return res.status(401).json({ message: "Authentication required" });
+      }
+
+      const targetId = String(req.params.userId);
+      if (String(viewer.id) === targetId) {
+        return res.status(200).json({ success: true, count: 0, friends: [] });
+      }
+
+      if (await isBlockedBetween(String(viewer.id), targetId)) {
+        return res.status(404).json({ message: "User not found" });
+      }
+
+      const [viewerUser, targetUser] = await Promise.all([
+        User.findById(viewer.id).select("friends").lean(),
+        User.findById(targetId).select("friends").lean(),
+      ]);
+      if (!viewerUser || !targetUser) {
+        return res.status(404).json({ message: "User not found" });
+      }
+
+      const viewerFriends = new Set(
+        ((viewerUser as any).friends || []).map((id: any) => String(id)),
+      );
+      const mutualIds = ((targetUser as any).friends || [])
+        .map((id: any) => String(id))
+        .filter((id: string) => viewerFriends.has(id));
+
+      const hidden = await getHiddenUserIds(String(viewer.id));
+      const visibleMutualIds = mutualIds.filter(
+        (id: string) =>
+          id &&
+          id !== String(viewer.id) &&
+          id !== targetId &&
+          !hidden.has(id),
+      );
+
+      const previewLimit = 8;
+      const previewIds = visibleMutualIds.slice(0, previewLimit);
+      const objectIds = previewIds
+        .filter((id: string) => mongoose.Types.ObjectId.isValid(id))
+        .map((id: string) => new mongoose.Types.ObjectId(id));
+
+      const previewUsers =
+        objectIds.length > 0
+          ? await User.find({ _id: { $in: objectIds } })
+              .select("username name profilePicUrl")
+              .lean()
+          : [];
+
+      const byId = new Map(
+        (previewUsers as any[]).map((u) => [String(u._id), u]),
+      );
+      const friends = previewIds
+        .map((id: string) => byId.get(id))
+        .filter(Boolean)
+        .map((u: any) => ({
+          _id: String(u._id),
+          username: u.username,
+          name: u.name,
+          profilePicUrl: u.profilePicUrl,
+        }));
+
+      return res.status(200).json({
+        success: true,
+        count: visibleMutualIds.length,
+        friends,
+      });
+    } catch (error) {
+      console.error("Failed to fetch mutual friends:", error);
+      return res
+        .status(500)
+        .json({ message: "Failed to fetch mutual friends" });
+    }
+  },
+);
 
 export default router;

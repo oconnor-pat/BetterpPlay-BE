@@ -9,6 +9,7 @@ import {
   aggregatePlayerRatings,
   haveSharedRoster,
 } from "../services/ratingService";
+import { getHiddenUserIds, isBlockedBetween } from "../services/blockService";
 
 const router = Router();
 
@@ -87,6 +88,10 @@ router.post("/user/:id/player-rating", async (req: Request, res: Response) => {
     }
     if (!mongoose.Types.ObjectId.isValid(rateeId)) {
       return res.status(400).json({ message: "Invalid user id" });
+    }
+
+    if (await isBlockedBetween(raterId, rateeId)) {
+      return res.status(403).json({ message: "You can't rate this player" });
     }
 
     const score = clampScore(req.body?.score);
@@ -203,8 +208,23 @@ router.get(
         return res.status(400).json({ message: "Invalid user id" });
       }
 
+      const viewerId = (req as any).user?.id
+        ? String((req as any).user.id)
+        : null;
+      const hiddenForSubject = await getHiddenUserIds(userId);
+      const hiddenForViewer = viewerId
+        ? await getHiddenUserIds(viewerId)
+        : new Set<string>();
+      const excludedRaters = Array.from(
+        new Set([...hiddenForSubject, ...hiddenForViewer]),
+      );
+      const raterFilter =
+        excludedRaters.length > 0
+          ? { raterId: { $nin: excludedRaters } }
+          : {};
+
       if (kind === "host") {
-        const rows = await EventRating.find({ hostId: userId })
+        const rows = await EventRating.find({ hostId: userId, ...raterFilter })
           .sort({ createdAt: -1 })
           .limit(100)
           .lean();
@@ -256,7 +276,7 @@ router.get(
         });
       }
 
-      const rows = await PlayerRating.find({ rateeId: userId })
+      const rows = await PlayerRating.find({ rateeId: userId, ...raterFilter })
         .sort({ createdAt: -1 })
         .limit(100)
         .lean();

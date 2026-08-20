@@ -7,6 +7,7 @@ import {
   resolveEventEndsAt,
 } from "../utils/eventDateTime";
 import { aggregateHostRatings } from "../services/ratingService";
+import { isBlockedBetween } from "../services/blockService";
 
 const router = Router();
 
@@ -177,6 +178,9 @@ router.post("/:id/ratings", async (req: Request, res: Response) => {
 
     if (userId === hostId) {
       return res.status(403).json({ message: "You can't rate your own event" });
+    }
+    if (await isBlockedBetween(userId, hostId)) {
+      return res.status(403).json({ message: "You can't rate this event" });
     }
     if (!isOnRoster(event, userId)) {
       return res
