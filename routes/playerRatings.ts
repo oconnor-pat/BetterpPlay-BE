@@ -112,19 +112,32 @@ router.post("/user/:id/player-rating", async (req: Request, res: Response) => {
         ? req.body.eventId
         : undefined;
 
-    const rating = await PlayerRating.findOneAndUpdate(
-      { raterId, rateeId },
-      {
-        $set: {
-          score,
-          comment,
-          ...(eventId ? { eventId } : {}),
-        },
-      },
-      { upsert: true, new: true, setDefaultsOnInsert: true },
-    );
+    const existing = await PlayerRating.findOne({ raterId, rateeId }).lean();
+    if (existing) {
+      return res.status(409).json({
+        message:
+          "You've already rated this player. Each person can leave one review.",
+      });
+    }
 
-    return res.status(200).json({ success: true, rating });
+    try {
+      const rating = await PlayerRating.create({
+        raterId,
+        rateeId,
+        score,
+        comment,
+        ...(eventId ? { eventId } : {}),
+      });
+      return res.status(201).json({ success: true, rating });
+    } catch (err: any) {
+      if (err?.code === 11000) {
+        return res.status(409).json({
+          message:
+            "You've already rated this player. Each person can leave one review.",
+        });
+      }
+      throw err;
+    }
   } catch (error) {
     console.error("Error submitting player rating:", error);
     return res.status(500).json({ message: "Failed to submit player rating" });
@@ -299,7 +312,22 @@ router.post(
       for (const [id, value] of map.entries()) {
         ratings[id] = value;
       }
-      return res.status(200).json({ success: true, ratings });
+
+      const raterId = (req as any).user?.id
+        ? String((req as any).user.id)
+        : null;
+      let ratedByMe: string[] = [];
+      if (raterId && userIds.length > 0) {
+        const mine = await PlayerRating.find({
+          raterId,
+          rateeId: { $in: userIds },
+        })
+          .select("rateeId")
+          .lean();
+        ratedByMe = mine.map((r) => String(r.rateeId));
+      }
+
+      return res.status(200).json({ success: true, ratings, ratedByMe });
     } catch (error) {
       console.error("Error fetching player rating summaries:", error);
       return res

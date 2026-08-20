@@ -185,6 +185,9 @@ export interface IEvent extends Document {
   reactions: IReaction[];
   privacy: "public" | "private" | "invite-only";
   invitedUsers: string[];
+  // Host-kicked user IDs. Blocked from rejoining / requesting / waitlisting
+  // until the creator explicitly re-invites (or adds) them.
+  removedUserIds: string[];
   // Public-event creator controls. `allowJoinRequests` (default true) means
   // strangers must request and wait for approval. When false, anyone can join
   // the roster directly (open join). `showLocationPublicly` (default false)
@@ -193,11 +196,15 @@ export interface IEvent extends Document {
   showLocationPublicly?: boolean;
   isRecurring?: boolean;
   recurrenceGroupId?: string;
-  recurrenceFrequency?: "weekly" | "biweekly" | "monthly";
+  recurrenceFrequency?: "weekly" | "biweekly" | "monthly" | "custom";
   // When true the series has no fixed end; we materialize a rolling
   // horizon of occurrences (see INDEFINITE_RECURRENCE_HORIZON) rather
   // than a user-picked count.
   recurrenceIndefinite?: boolean;
+  // Custom series only: days between consecutive occurrences, length
+  // count-1. Event 2 is offsets[0] days after event 1, event 3 is
+  // offsets[1] days after event 2, and so on.
+  recurrenceOffsetsDays?: number[];
   // Absolute start instant (UTC). Used by the reminder scheduler so wall-clock
   // date+time aren't misread as the server's local timezone (Heroku = UTC).
   startsAt?: Date;
@@ -261,16 +268,18 @@ const EventSchema: Schema = new Schema(
       default: "public",
     }, // Event visibility
     invitedUsers: { type: [String], default: [] }, // Array of userIds invited
+    removedUserIds: { type: [String], default: [] }, // Host-kicked; blocked until re-invited
     allowJoinRequests: { type: Boolean, default: true },
     showLocationPublicly: { type: Boolean, default: false },
     isRecurring: { type: Boolean, default: false },
     recurrenceGroupId: { type: String, default: null },
     recurrenceFrequency: {
       type: String,
-      enum: ["weekly", "biweekly", "monthly", null],
+      enum: ["weekly", "biweekly", "monthly", "custom", null],
       default: null,
     },
     recurrenceIndefinite: { type: Boolean, default: false },
+    recurrenceOffsetsDays: { type: [Number], default: [] },
     // Venue listing reference (Google Place ID + cached display fields).
     // Indexed because the venue detail page queries by venueId.
     venueId: { type: String, required: false, index: true },

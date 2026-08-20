@@ -2,7 +2,7 @@ import mongoose, { Document, Schema } from "mongoose";
 
 /**
  * Peer "player" rating — independent of hosting. One rating per
- * (rater, ratee) pair; re-submitting updates the score.
+ * (rater, ratee) pair; a second submit is rejected (409).
  * Rater must have shared at least one event roster with the ratee.
  */
 export interface IPlayerRating extends Document {

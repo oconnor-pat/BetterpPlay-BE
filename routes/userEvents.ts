@@ -115,11 +115,20 @@ router.get("/user/:id/events/stats", async (req: Request, res: Response) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    const createdCount = await Event.countDocuments({ createdBy: userId });
+    const createdGroups = await Event.aggregate([
+      { $match: { createdBy: userId } },
+      {
+        $group: {
+          _id: { $ifNull: ["$recurrenceGroupId", "$_id"] },
+        },
+      },
+      { $count: "n" },
+    ]);
+    const createdCount = createdGroups[0]?.n ?? 0;
 
     const joinedCount = await Event.countDocuments({
-      "roster.username": user.username,
       createdBy: { $ne: userId },
+      "roster.userId": userId,
     });
 
     const hostRatings = await aggregateHostRatings([userId]);

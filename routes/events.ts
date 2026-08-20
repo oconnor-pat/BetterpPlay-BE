@@ -101,9 +101,229 @@ const isRosterFull = (event: {
   !isUnlimitedSpots(event.totalSpots) &&
   event.roster.length >= event.totalSpots;
 
+const isInvitedToEvent = (
+  event: { invitedUsers?: any[] },
+  userId: string,
+): boolean =>
+  (event.invitedUsers || []).map(String).includes(String(userId));
+
+const isRemovedFromEvent = (
+  event: { removedUserIds?: any[] },
+  userId: string,
+): boolean =>
+  (event.removedUserIds || []).map(String).includes(String(userId));
+
+/** Drop a user from every soft-membership list (not the kick ban list). */
+function purgeUserFromEventLists(event: any, userId: string): void {
+  const id = String(userId);
+  event.invitedUsers = (event.invitedUsers || []).filter(
+    (uid: any) => String(uid) !== id,
+  );
+  event.waitlist = (event.waitlist || []).filter(
+    (w: any) => String(w.userId) !== id,
+  );
+  event.rsvps = (event.rsvps || []).filter(
+    (r: any) => String(r.userId) !== id,
+  );
+  event.joinRequests = (event.joinRequests || []).filter(
+    (r: any) => String(r.userId) !== id,
+  );
+  event.guestAddRequests = (event.guestAddRequests || []).filter(
+    (r: any) =>
+      String(r.proposedUserId) !== id && String(r.requestedBy) !== id,
+  );
+  if (event.spotReservation && String(event.spotReservation.userId) === id) {
+    event.spotReservation = null;
+  }
+}
+
+function markUserRemovedFromEvent(event: any, userId: string): void {
+  const id = String(userId);
+  if (!event.removedUserIds) {
+    event.removedUserIds = [];
+  }
+  if (!event.removedUserIds.map(String).includes(id)) {
+    event.removedUserIds.push(id);
+  }
+}
+
+/** Host re-invite / explicit add clears the kick ban. */
+function clearUserRemovedFromEvent(event: any, userId: string): void {
+  const id = String(userId);
+  event.removedUserIds = (event.removedUserIds || []).filter(
+    (uid: any) => String(uid) !== id,
+  );
+}
+
+// Host-initiated invites should not dump people onto the waitlist of a full
+// event. Expand totalSpots so roster + pending invitees all have a seat.
+function expandCapacityForPendingInvites(event: any): boolean {
+  if (isUnlimitedSpots(event.totalSpots)) {
+    return false;
+  }
+  const rosterIds = new Set(
+    (event.roster || [])
+      .map((p: any) => (p?.userId != null ? String(p.userId) : ""))
+      .filter(Boolean),
+  );
+  const creatorId = String(event.createdBy || "");
+  const pendingInvitees = (event.invitedUsers || []).filter((id: any) => {
+    const s = String(id);
+    return s && s !== creatorId && !rosterIds.has(s);
+  });
+  const needed = event.roster.length + pendingInvitees.length;
+  if (needed <= event.totalSpots) {
+    return false;
+  }
+  event.totalSpots = needed;
+  return true;
+}
+
+// Invites sent before capacity was expanded: if an invitee tries to join a
+// full event, give them the extra seat instead of "event is full".
+function expandCapacityForInvitedJoiner(event: any, userId: string): boolean {
+  if (isUnlimitedSpots(event.totalSpots) || !isRosterFull(event)) {
+    return false;
+  }
+  if (!isInvitedToEvent(event, userId)) {
+    return false;
+  }
+  event.totalSpots = event.roster.length + 1;
+  return true;
+}
+
+// Unique userId → an affected event they're on (roster, invite, or waitlist).
+// Used so series edits ping everyone tied to any updated card, not just the
+// one that was opened in the editor.
+function collectUpdateRecipients(
+  events: any[],
+  excludeUserId: string | null,
+): Map<string, string> {
+  const recipientToEventId = new Map<string, string>();
+  const add = (userId: any, eventId: string) => {
+    const id = userId != null ? String(userId) : "";
+    if (!id || (excludeUserId && id === excludeUserId)) {
+      return;
+    }
+    if (!recipientToEventId.has(id)) {
+      recipientToEventId.set(id, eventId);
+    }
+  };
+  for (const doc of events) {
+    const eid = String(doc._id);
+    for (const p of doc.roster || []) {
+      add(p.userId, eid);
+    }
+    for (const id of doc.invitedUsers || []) {
+      add(id, eid);
+    }
+    for (const w of doc.waitlist || []) {
+      add(w.userId, eid);
+    }
+  }
+  return recipientToEventId;
+}
+
+// A series of one isn't a series. Clear recurrence flags so the leftover
+// card renders as a normal solo event (no stack chrome, no Recurring badge).
+async function demoteSingletonSeries(
+  groupId: string | null | undefined,
+): Promise<any | null> {
+  if (!groupId) {
+    return null;
+  }
+  const remaining = await Event.find({ recurrenceGroupId: groupId });
+  if (remaining.length !== 1) {
+    return null;
+  }
+  const solo = remaining[0];
+  solo.isRecurring = false;
+  solo.recurrenceGroupId = null as any;
+  solo.recurrenceFrequency = null as any;
+  (solo as any).recurrenceIndefinite = false;
+  (solo as any).recurrenceOffsetsDays = [];
+  await solo.save();
+  return solo;
+}
+
+function applySoloFlags(target: any): void {
+  target.isRecurring = false;
+  target.recurrenceGroupId = null as any;
+  target.recurrenceFrequency = null as any;
+  (target as any).recurrenceIndefinite = false;
+  (target as any).recurrenceOffsetsDays = [];
+}
+
 // Shift a stored "YYYY-MM-DD" date by `steps` recurrence intervals (steps may
 // be negative). Mirrors the arithmetic used when a recurring series is first
 // generated so re-sequencing an edited series stays perfectly in step.
+type RecurrenceFrequency =
+  | "weekly"
+  | "biweekly"
+  | "monthly"
+  | "custom";
+
+const CUSTOM_OFFSET_MIN = 1;
+const CUSTOM_OFFSET_MAX = 365;
+const CUSTOM_OFFSET_DEFAULT = 7;
+
+const normalizeCustomOffsets = (
+  raw: unknown,
+  expectedGaps: number,
+): number[] => {
+  const arr = Array.isArray(raw) ? raw : [];
+  const offsets: number[] = [];
+  for (let i = 0; i < expectedGaps; i++) {
+    const n = Math.round(Number(arr[i]));
+    if (Number.isFinite(n) && n >= CUSTOM_OFFSET_MIN) {
+      offsets.push(Math.min(n, CUSTOM_OFFSET_MAX));
+    } else {
+      offsets.push(CUSTOM_OFFSET_DEFAULT);
+    }
+  }
+  return offsets;
+};
+
+// Add whole days on a YYYY-MM-DD calendar date in UTC so Heroku's timezone
+// doesn't shift the day. Used by custom series (irregular gaps).
+const addDaysToIsoDate = (anchorDate: string, days: number): string => {
+  const iso = toIsoDate(anchorDate);
+  const [y, m, d] = iso.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + days);
+  return dt.toISOString().split("T")[0];
+};
+
+const customPatternGapCount = (
+  recurrenceCount: unknown,
+  rawOffsets: unknown,
+): number => {
+  const n = parseInt(String(recurrenceCount ?? ""), 10);
+  if (Number.isFinite(n) && n >= 2) {
+    return Math.min(n - 1, 11);
+  }
+  if (Array.isArray(rawOffsets) && rawOffsets.length >= 1) {
+    return Math.min(rawOffsets.length, 11);
+  }
+  return 1;
+};
+
+const customOccurrenceDate = (
+  anchorDate: string,
+  offsets: number[],
+  index: number,
+): string => {
+  let date = toIsoDate(anchorDate);
+  const cycle = offsets.length > 0 ? offsets : [CUSTOM_OFFSET_DEFAULT];
+  for (let i = 0; i < index; i++) {
+    date = addDaysToIsoDate(
+      date,
+      cycle[i % cycle.length] ?? CUSTOM_OFFSET_DEFAULT,
+    );
+  }
+  return date;
+};
+
 const shiftRecurrenceDate = (
   anchorDate: string,
   frequency: "weekly" | "biweekly" | "monthly",
@@ -118,6 +338,20 @@ const shiftRecurrenceDate = (
     d.setMonth(d.getMonth() + steps);
   }
   return d.toISOString().split("T")[0];
+};
+
+const occurrenceDateAt = (
+  anchorDate: string,
+  frequency: RecurrenceFrequency | string,
+  steps: number,
+  offsets?: number[],
+): string => {
+  if (frequency === "custom") {
+    return customOccurrenceDate(anchorDate, offsets || [], steps);
+  }
+  const cadence =
+    frequency === "biweekly" || frequency === "monthly" ? frequency : "weekly";
+  return shiftRecurrenceDate(anchorDate, cadence, steps);
 };
 
 // Drop a system message into a group's chat when an event is scheduled
@@ -708,17 +942,41 @@ router.post("/", async (req: Request, res: Response) => {
 
     if (isRecurring && recurrenceFrequency && (recurrenceCount > 1 || recurrenceIndefinite || recurrenceCount === 0 || recurrenceCount === "0" || recurrenceCount === "indefinite")) {
       const recurrenceGroupId = new mongoose.Types.ObjectId().toString();
-      const { count, indefinite } = resolveRecurrenceCount(
+      const isCustom = recurrenceFrequency === "custom";
+      const { count: resolvedCount, indefinite } = resolveRecurrenceCount(
         recurrenceCount,
         recurrenceIndefinite ?? req.body?.recurrenceIndefinite,
       );
+      const parsedCustomCount = parseInt(String(recurrenceCount ?? 4), 10);
+      const finiteCustomCount = Math.min(
+        Math.max(
+          !Number.isFinite(parsedCustomCount) || parsedCustomCount < 2
+            ? 4
+            : parsedCustomCount,
+          2,
+        ),
+        12,
+      );
+      const count = isCustom && !indefinite ? finiteCustomCount : resolvedCount;
+      const customOffsets = isCustom
+        ? normalizeCustomOffsets(
+            req.body?.recurrenceOffsetsDays,
+            indefinite
+              ? customPatternGapCount(
+                  recurrenceCount,
+                  req.body?.recurrenceOffsetsDays,
+                )
+              : count - 1,
+          )
+        : [];
       const eventsToCreate = [];
 
       for (let i = 0; i < count; i++) {
-        const occurrenceDate = shiftRecurrenceDate(
+        const occurrenceDate = occurrenceDateAt(
           storedDate,
-          recurrenceFrequency as "weekly" | "biweekly" | "monthly",
+          recurrenceFrequency,
           i,
+          customOffsets,
         );
         eventsToCreate.push({
           ...baseEventData,
@@ -733,6 +991,7 @@ router.post("/", async (req: Request, res: Response) => {
           recurrenceGroupId,
           recurrenceFrequency,
           recurrenceIndefinite: indefinite,
+          recurrenceOffsetsDays: customOffsets,
         });
       }
 
@@ -989,7 +1248,11 @@ router.put("/:id", async (req: Request, res: Response) => {
       const newlyInvited = invitedUsers.filter(
         (id: string) => !previousInvitedUsers.includes(id),
       );
+      for (const id of newlyInvited) {
+        clearUserRemovedFromEvent(event, id);
+      }
       if (newlyInvited.length > 0) {
+        await event.save();
         const currentUser = (req as any).user;
         notificationService.sendPushNotificationToMany(
           newlyInvited,
@@ -1046,6 +1309,7 @@ router.put("/:id", async (req: Request, res: Response) => {
     const recurrenceIntentProvided = typeof isRecurring === "boolean";
     const wasRecurring = !!(event.isRecurring && event.recurrenceGroupId);
     const editedId = event._id.toString();
+    const affectedEventIds = new Set<string>([editedId]);
 
     const buildOccurrence = (occurrenceDate: string, groupId: string) => ({
       name: event.name,
@@ -1068,8 +1332,9 @@ router.put("/:id", async (req: Request, res: Response) => {
       waitlist: [],
       rsvps: [],
       joinRequests: [],
-      latitude: event.latitude,
-      longitude: event.longitude,
+      isVirtual: !!(event as any).isVirtual,
+      latitude: (event as any).isVirtual ? undefined : event.latitude,
+      longitude: (event as any).isVirtual ? undefined : event.longitude,
       jerseyColors: event.jerseyColors || [],
       privacy: event.privacy,
       invitedUsers: event.invitedUsers || [],
@@ -1079,8 +1344,9 @@ router.put("/:id", async (req: Request, res: Response) => {
       recurrenceGroupId: groupId,
       recurrenceFrequency: event.recurrenceFrequency,
       recurrenceIndefinite: !!(event as any).recurrenceIndefinite,
-      venueId: event.venueId,
-      venueName: event.venueName,
+      recurrenceOffsetsDays: (event as any).recurrenceOffsetsDays || [],
+      venueId: (event as any).isVirtual ? undefined : event.venueId,
+      venueName: (event as any).isVirtual ? undefined : event.venueName,
       groupId: event.groupId,
       groupName: event.groupName,
       sourceUrl: event.sourceUrl,
@@ -1089,7 +1355,8 @@ router.put("/:id", async (req: Request, res: Response) => {
     if (recurrenceIntentProvided) {
       const frequency = (recurrenceFrequency ||
         event.recurrenceFrequency ||
-        "weekly") as "weekly" | "biweekly" | "monthly";
+        "weekly") as RecurrenceFrequency;
+      const isCustom = frequency === "custom";
       const { count: resolvedCount, indefinite } = resolveRecurrenceCount(
         recurrenceCount,
         req.body?.recurrenceIndefinite,
@@ -1102,6 +1369,19 @@ router.put("/:id", async (req: Request, res: Response) => {
             Math.max(parseInt(String(recurrenceCount ?? 1), 10) || 1, 1),
             12,
           );
+      const customOffsets = isCustom
+        ? normalizeCustomOffsets(
+            req.body?.recurrenceOffsetsDays,
+            indefinite
+              ? customPatternGapCount(
+                  recurrenceCount,
+                  req.body?.recurrenceOffsetsDays,
+                )
+              : Math.max(targetCount - 1, 0),
+          )
+        : [];
+      const dateForIndex = (k: number) =>
+        occurrenceDateAt(event.date, frequency, k, customOffsets);
 
       if (!isRecurring && wasRecurring) {
         // Recurring → single: keep only the edited occurrence, delete the rest
@@ -1114,6 +1394,7 @@ router.put("/:id", async (req: Request, res: Response) => {
         event.recurrenceGroupId = null as any;
         event.recurrenceFrequency = null as any;
         (event as any).recurrenceIndefinite = false;
+        (event as any).recurrenceOffsetsDays = [];
         await event.save();
         seriesChanged = true;
       } else if (isRecurring && !wasRecurring) {
@@ -1124,15 +1405,13 @@ router.put("/:id", async (req: Request, res: Response) => {
         event.recurrenceGroupId = newGroupId;
         event.recurrenceFrequency = frequency;
         (event as any).recurrenceIndefinite = indefinite;
+        (event as any).recurrenceOffsetsDays = customOffsets;
         await event.save();
         const seriesCount = indefinite ? resolvedCount : Math.max(targetCount, 2);
         const toCreate = [];
         for (let k = 1; k < seriesCount; k++) {
           toCreate.push(
-            buildOccurrence(
-              shiftRecurrenceDate(event.date, frequency, k),
-              newGroupId,
-            ),
+            buildOccurrence(dateForIndex(k), newGroupId),
           );
         }
         if (toCreate.length > 0) {
@@ -1140,38 +1419,16 @@ router.put("/:id", async (req: Request, res: Response) => {
         }
         seriesChanged = true;
       } else if (isRecurring && wasRecurring) {
-        // Still recurring: re-shape the series. Dates are re-sequenced from the
-        // edited occurrence forward (earlier/already-happened occurrences keep
-        // their dates), while the shared "identity" fields (name, location,
-        // time, spots, etc.) propagate to the *whole* series so every
-        // occurrence stays the same event. Reused occurrences keep their
-        // roster/RSVPs; extras are created empty and any surplus tail removed.
-        event.recurrenceFrequency = frequency;
-        (event as any).recurrenceIndefinite = indefinite;
-        await event.save();
+        // Still recurring. `editScope` decides who gets the field updates:
+        //   this   — only the edited card (already saved above)
+        //   count  — this card + the next N-1 by date
+        //   series — whole series (also re-shapes count / frequency)
+        // Virtual vs physical (and therefore the map) stays per-occurrence
+        // unless this scope copies isVirtual onto those targets.
+        const rawScope = String(req.body?.editScope || "series").toLowerCase();
+        const editScope =
+          rawScope === "this" || rawScope === "count" ? rawScope : "series";
 
-        const series = await Event.find({
-          recurrenceGroupId: event.recurrenceGroupId,
-        });
-        const ordered = series
-          .map((e) => ({
-            e,
-            sortDate:
-              e._id.toString() === editedId ? String(oldValues.date) : e.date,
-          }))
-          .sort((a, b) =>
-            a.sortDate < b.sortDate ? -1 : a.sortDate > b.sortDate ? 1 : 0,
-          );
-        const editedIndex = ordered.findIndex(
-          (o) => o.e._id.toString() === editedId,
-        );
-        const before = ordered.slice(0, editedIndex).map((o) => o.e);
-        const forward = ordered.slice(editedIndex).map((o) => o.e);
-        const groupId = String(event.recurrenceGroupId);
-        const ops: Promise<any>[] = [];
-
-        // Copy the edited occurrence's shared fields onto a sibling. Dates,
-        // roster/RSVPs and recurrence bookkeeping are handled separately.
         const applySharedFields = (t: any) => {
           t.name = event.name;
           t.location = event.location;
@@ -1184,57 +1441,158 @@ router.put("/:id", async (req: Request, res: Response) => {
           t.allowJoinRequests = event.allowJoinRequests;
           t.showLocationPublicly = event.showLocationPublicly;
           t.jerseyColors = event.jerseyColors || [];
-          t.latitude = event.latitude;
-          t.longitude = event.longitude;
+          t.isVirtual = !!(event as any).isVirtual;
+          if (t.isVirtual) {
+            t.latitude = null;
+            t.longitude = null;
+            t.venueId = null;
+            t.venueName = null;
+          } else {
+            t.latitude = event.latitude;
+            t.longitude = event.longitude;
+            t.venueId = event.venueId;
+            t.venueName = event.venueName;
+          }
           t.invitedUsers = event.invitedUsers || [];
-          t.venueId = event.venueId;
-          t.venueName = event.venueName;
           t.groupId = event.groupId;
           t.groupName = event.groupName;
           t.sourceUrl = event.sourceUrl;
           t.recurrenceIndefinite = !!(event as any).recurrenceIndefinite;
+          (t as any).recurrenceOffsetsDays =
+            (event as any).recurrenceOffsetsDays || [];
+          (t as any).startsAt = resolveEventStartsAt({
+            date: t.date,
+            time: event.time,
+            timezoneOffsetMinutes: (event as any).timezoneOffsetMinutes,
+          });
+          (t as any).timezoneOffsetMinutes = (
+            event as any
+          ).timezoneOffsetMinutes;
         };
 
-        // Earlier occurrences: keep their dates, sync shared fields only.
-        for (const e of before) {
-          applySharedFields(e);
-          ops.push(e.save());
-        }
+        if (editScope !== "this") {
+          event.recurrenceFrequency = frequency;
+          (event as any).recurrenceIndefinite = indefinite;
+          (event as any).recurrenceOffsetsDays = customOffsets;
+          await event.save();
 
-        for (let k = 0; k < targetCount; k++) {
-          const occurrenceDate = shiftRecurrenceDate(event.date, frequency, k);
-          const existing = forward[k];
-          if (existing) {
-            // forward[0] is the edited event itself — already saved with the
-            // new fields, so only sync the rest.
-            if (existing._id.toString() !== editedId) {
-              applySharedFields(existing);
-            }
-            existing.date = occurrenceDate;
-            existing.recurrenceFrequency = frequency;
-            existing.isRecurring = true;
-            (existing as any).recurrenceIndefinite = indefinite;
-            (existing as any).startsAt = resolveEventStartsAt({
-              date: occurrenceDate,
-              time: event.time,
-              timezoneOffsetMinutes: (event as any).timezoneOffsetMinutes,
-            });
-            (existing as any).timezoneOffsetMinutes = (
-              event as any
-            ).timezoneOffsetMinutes;
-            ops.push(existing.save());
-          } else {
-            ops.push(
-              Event.create(buildOccurrence(occurrenceDate, groupId)) as any,
+          const series = await Event.find({
+            recurrenceGroupId: event.recurrenceGroupId,
+          });
+          const ordered = series
+            .map((e) => ({
+              e,
+              sortDate:
+                e._id.toString() === editedId
+                  ? String(oldValues.date)
+                  : e.date,
+            }))
+            .sort((a, b) =>
+              a.sortDate < b.sortDate
+                ? -1
+                : a.sortDate > b.sortDate
+                  ? 1
+                  : 0,
             );
+          const editedIndex = ordered.findIndex(
+            (o) => o.e._id.toString() === editedId,
+          );
+          const before = ordered.slice(0, editedIndex).map((o) => o.e);
+          const forward = ordered.slice(editedIndex).map((o) => o.e);
+          const groupId = String(event.recurrenceGroupId);
+          const ops: Promise<any>[] = [];
+          const dateChanged = String(oldValues.date) !== String(event.date);
+
+          if (editScope === "count") {
+            const requested =
+              parseInt(String(req.body?.editScopeCount ?? 1), 10) || 1;
+            const n = Math.min(
+              Math.max(requested, 1),
+              Math.max(forward.length, 1),
+            );
+            for (let k = 0; k < n; k++) {
+              const existing = forward[k];
+              if (!existing) {
+                continue;
+              }
+              affectedEventIds.add(existing._id.toString());
+              if (existing._id.toString() !== editedId) {
+                applySharedFields(existing);
+              }
+              // Custom gaps (and a moved start date) re-lay out this slice
+              // even when the edited card's date didn't change.
+              if (dateChanged || isCustom) {
+                const occurrenceDate = dateForIndex(k);
+                existing.date = occurrenceDate;
+                (existing as any).startsAt = resolveEventStartsAt({
+                  date: occurrenceDate,
+                  time: event.time,
+                  timezoneOffsetMinutes: (event as any)
+                    .timezoneOffsetMinutes,
+                });
+              }
+              existing.recurrenceFrequency = frequency;
+              existing.isRecurring = true;
+              (existing as any).recurrenceIndefinite = indefinite;
+              (existing as any).recurrenceOffsetsDays = customOffsets;
+              ops.push(existing.save());
+            }
+          } else {
+            // Entire series: keep dates on earlier cards, re-sequence from
+            // this one forward, create/delete to match the requested count.
+            for (const e of before) {
+              applySharedFields(e);
+              affectedEventIds.add(e._id.toString());
+              ops.push(e.save());
+            }
+
+            for (let k = 0; k < targetCount; k++) {
+              const occurrenceDate = dateForIndex(k);
+              const existing = forward[k];
+              if (existing) {
+                affectedEventIds.add(existing._id.toString());
+                if (existing._id.toString() !== editedId) {
+                  applySharedFields(existing);
+                }
+                existing.date = occurrenceDate;
+                existing.recurrenceFrequency = frequency;
+                existing.isRecurring = true;
+                (existing as any).recurrenceIndefinite = indefinite;
+                (existing as any).recurrenceOffsetsDays = customOffsets;
+                (existing as any).startsAt = resolveEventStartsAt({
+                  date: occurrenceDate,
+                  time: event.time,
+                  timezoneOffsetMinutes: (event as any)
+                    .timezoneOffsetMinutes,
+                });
+                (existing as any).timezoneOffsetMinutes = (
+                  event as any
+                ).timezoneOffsetMinutes;
+                ops.push(existing.save());
+              } else {
+                ops.push(
+                  Event.create(
+                    buildOccurrence(occurrenceDate, groupId),
+                  ).then((doc: any) => {
+                    if (doc?._id) {
+                      affectedEventIds.add(String(doc._id));
+                    }
+                  }) as any,
+                );
+              }
+            }
+            for (let k = targetCount; k < forward.length; k++) {
+              ops.push(Event.deleteOne({ _id: forward[k]._id }) as any);
+            }
+          }
+
+          await Promise.all(ops);
+          seriesChanged = true;
+          const demoted = await demoteSingletonSeries(groupId);
+          if (demoted && String(demoted._id) === editedId) {
+            applySoloFlags(event);
           }
         }
-        // Remove surplus occurrences beyond the new count.
-        for (let k = targetCount; k < forward.length; k++) {
-          ops.push(Event.deleteOne({ _id: forward[k]._id }) as any);
-        }
-        await Promise.all(ops);
-        seriesChanged = true;
       }
     } else if (
       changedFields.includes("date") &&
@@ -1262,17 +1620,27 @@ router.put("/:id", async (req: Request, res: Response) => {
           (o) => o.e._id.toString() === editedId,
         );
         const anchor = event.date;
-        const frequency = event.recurrenceFrequency as
-          | "weekly"
-          | "biweekly"
-          | "monthly";
+        const frequency = event.recurrenceFrequency as RecurrenceFrequency;
+        const customOffsets =
+          frequency === "custom"
+            ? normalizeCustomOffsets(
+                (event as any).recurrenceOffsetsDays,
+                Math.max(ordered.length - editedIndex - 1, 0),
+              )
+            : [];
         const saves: Promise<any>[] = [];
         for (let j = editedIndex; j < ordered.length; j++) {
           const target = ordered[j].e;
           if (target._id.toString() === editedId) continue;
-          const nextDate = shiftRecurrenceDate(anchor, frequency, j - editedIndex);
+          const nextDate = occurrenceDateAt(
+            anchor,
+            frequency,
+            j - editedIndex,
+            customOffsets,
+          );
           if (target.date !== nextDate) {
             target.date = nextDate;
+            affectedEventIds.add(target._id.toString());
             saves.push(target.save());
           }
         }
@@ -1283,29 +1651,54 @@ router.put("/:id", async (req: Request, res: Response) => {
       }
     }
 
-    if (event.roster && event.roster.length > 0) {
-      const participantUserIds = event.roster
-        .filter((p: any) => p.userId)
-        .map((p: any) => p.userId);
+    const actorId = (req as any).user?.id
+      ? String((req as any).user.id)
+      : null;
+    const affectedDocs = await Event.find({
+      _id: { $in: Array.from(affectedEventIds) },
+    }).select("roster invitedUsers waitlist name date time");
 
-      if (participantUserIds.length > 0) {
-        const notifBody =
-          changedFields.length > 0
-            ? `${event.name}: ${changeDescriptions.join(", ")}`
-            : `Event "${event.name}" has been updated`;
+    const recipientToEventId = collectUpdateRecipients(affectedDocs, actorId);
+    if (recipientToEventId.size > 0) {
+      const multi = affectedEventIds.size > 1;
+      const scopeNote = multi ? ` (${affectedEventIds.size} events)` : "";
+      const notifBody =
+        changedFields.length > 0
+          ? `${event.name}${scopeNote}: ${changeDescriptions.join(", ")}`
+          : `Event "${event.name}" has been updated${scopeNote}`;
+      const title = multi ? "Series updated" : "Event Updated";
 
-        notificationService.sendPushNotificationToMany(
-          participantUserIds,
-          "Event Updated",
-          notifBody,
-          "event_update",
-          {
-            eventId: event._id.toString(),
-            eventName: event.name,
-            changedFields: changedFields.join(","),
-          },
-        );
+      const byEvent = new Map<string, string[]>();
+      for (const [userId, targetEventId] of recipientToEventId) {
+        const list = byEvent.get(targetEventId) || [];
+        list.push(userId);
+        byEvent.set(targetEventId, list);
       }
+
+      const dateByEvent = new Map(
+        affectedDocs.map((d: any) => [String(d._id), String(d.date || "")]),
+      );
+      const timeByEvent = new Map(
+        affectedDocs.map((d: any) => [String(d._id), String(d.time || "")]),
+      );
+
+      await Promise.all(
+        Array.from(byEvent.entries()).map(([targetEventId, userIds]) =>
+          notificationService.sendPushNotificationToMany(
+            userIds,
+            title,
+            notifBody,
+            "event_update",
+            {
+              eventId: targetEventId,
+              eventName: event.name,
+              date: dateByEvent.get(targetEventId) || event.date,
+              time: timeByEvent.get(targetEventId) || event.time,
+              changedFields: changedFields.join(","),
+            },
+          ),
+        ),
+      );
     }
 
     socketService.emitToAll("events:refresh", {
@@ -1315,7 +1708,14 @@ router.put("/:id", async (req: Request, res: Response) => {
     });
     socketService.emitToEvent(event._id.toString(), "event:updated", { event });
 
-    res.status(200).json(event);
+    const payload =
+      typeof (event as any).toObject === "function"
+        ? (event as any).toObject()
+        : event;
+    res.status(200).json({
+      ...payload,
+      affectedEventIds: Array.from(affectedEventIds),
+    });
   } catch (error) {
     res.status(500).json({ message: "Failed to update event" });
   }
@@ -1343,6 +1743,21 @@ router.post("/:id/roster", async (req: Request, res: Response) => {
     const actorId = (req as any).user?.id
       ? String((req as any).user.id)
       : null;
+
+    // Host-kicked users can't self-join; creator adding them clears the ban.
+    if (entry.userId && isRemovedFromEvent(event, String(entry.userId))) {
+      const creatorAdding =
+        !!actorId && String(event.createdBy) === actorId;
+      if (!creatorAdding) {
+        return res.status(403).json({
+          message:
+            "You've been removed from this event. Ask the host to invite you again.",
+          removed: true,
+        });
+      }
+      clearUserRemovedFromEvent(event, String(entry.userId));
+    }
+
     if (
       (event.privacy || "public") === "public" &&
       event.allowJoinRequests !== false &&
@@ -1363,6 +1778,10 @@ router.post("/:id/roster", async (req: Request, res: Response) => {
       new Date(event.spotReservation.expiresAt) <= new Date()
     ) {
       event.spotReservation = null;
+    }
+
+    if (entry.userId) {
+      expandCapacityForInvitedJoiner(event, String(entry.userId));
     }
 
     if (isRosterFull(event)) {
@@ -1441,11 +1860,16 @@ router.post("/:id/roster", async (req: Request, res: Response) => {
       roster: event.roster,
       rosterSpotsFilled: event.rosterSpotsFilled,
       spotReservation: event.spotReservation,
+      totalSpots: event.totalSpots,
     });
     broadcastRosterChanged(event);
     socketService.emitToAll("events:refresh", { reason: "roster_join", eventId });
 
-    return res.status(200).json({ success: true, roster: event.roster });
+    return res.status(200).json({
+      success: true,
+      roster: event.roster,
+      totalSpots: event.totalSpots,
+    });
   } catch (error) {
     console.error("Error adding participant to roster:", error);
     return res
@@ -1540,12 +1964,13 @@ function promoteWaitlistIfNeeded(event: any, eventId: string): void {
 // Public events go to everyone; private/invite-only events go only to the
 // creator and invited users so roster PII isn't leaked to outsiders.
 function broadcastRosterChanged(event: any): void {
-  const payload = {
-    eventId: event._id.toString(),
-    roster: event.roster,
-    rsvps: event.rsvps,
-    rosterSpotsFilled: event.rosterSpotsFilled,
-  };
+    const payload = {
+      eventId: event._id.toString(),
+      roster: event.roster,
+      rsvps: event.rsvps,
+      rosterSpotsFilled: event.rosterSpotsFilled,
+      totalSpots: event.totalSpots,
+    };
   // Roster identities are gated — public events hide their roster until a
   // requester is approved — so only push this detailed patch to people who
   // are allowed to see it: the creator, anyone already on the roster, and
@@ -1644,19 +2069,65 @@ router.delete(
     const eventId = req.params.id;
     const username = req.params.username;
     try {
+      const actor = (req as any).user;
+      if (!actor?.id) {
+        return res.status(401).json({ message: "Authentication required" });
+      }
+      const actorId = String(actor.id);
+
       const event = await Event.findById(eventId);
       if (!event) {
         return res.status(404).json({ message: "Event not found" });
       }
-      const wasFull = isRosterFull(event);
-      const initialLength = event.roster.length;
-      event.roster = event.roster.filter((p: any) => p.username !== username);
-      if (event.roster.length === initialLength) {
+
+      const target = (event.roster || []).find(
+        (p: any) => p.username === username,
+      );
+      if (!target) {
         return res
           .status(404)
           .json({ message: "Participant not found in roster" });
       }
+
+      const targetUserId = target.userId ? String(target.userId) : null;
+      const isSelf =
+        (targetUserId && targetUserId === actorId) ||
+        (!!actor.username &&
+          String(actor.username).toLowerCase() ===
+            String(username).toLowerCase());
+      const isCreator = String(event.createdBy) === actorId;
+      if (!isSelf && !isCreator) {
+        return res.status(403).json({
+          message: "Only the host can remove other players from this event",
+        });
+      }
+      // Host leaving their own event uses the self path; don't "boot" yourself.
+      const isBoot = isCreator && !isSelf;
+
+      const wasFull = isRosterFull(event);
+      event.roster = event.roster.filter((p: any) => p.username !== username);
       event.rosterSpotsFilled = event.roster.length;
+
+      if (isBoot && targetUserId) {
+        // Full kick: off roster, off invite/waitlist/RSVP queues, and banned
+        // from rejoining until the host re-invites them.
+        purgeUserFromEventLists(event, targetUserId);
+        markUserRemovedFromEvent(event, targetUserId);
+      } else if (targetUserId) {
+        // Self-leave: clear waitlist/RSVP residue but keep invite eligibility.
+        event.waitlist = (event.waitlist || []).filter(
+          (w: any) => String(w.userId) !== targetUserId,
+        );
+        event.rsvps = (event.rsvps || []).filter(
+          (r: any) => String(r.userId) !== targetUserId,
+        );
+        if (
+          event.spotReservation &&
+          String(event.spotReservation.userId) === targetUserId
+        ) {
+          event.spotReservation = null;
+        }
+      }
 
       // Reserve the spot for the first waitlisted user
       if (wasFull && event.waitlist && event.waitlist.length > 0) {
@@ -1738,7 +2209,15 @@ router.delete(
 
       await event.save();
 
-      if (event.createdBy) {
+      if (isBoot && targetUserId) {
+        notificationService.sendPushNotification({
+          userId: targetUserId,
+          title: "Removed from event",
+          body: `You've been removed from "${event.name}" by the host.`,
+          type: "event_removed",
+          data: { eventId: event._id.toString(), eventName: event.name },
+        });
+      } else if (event.createdBy && !isBoot) {
         notificationService.sendPushNotification({
           userId: String(event.createdBy),
           title: "Player Left",
@@ -1754,11 +2233,26 @@ router.delete(
         rosterSpotsFilled: event.rosterSpotsFilled,
         waitlist: event.waitlist,
         spotReservation: event.spotReservation,
+        invitedUsers: event.invitedUsers,
+        removedUserIds: event.removedUserIds || [],
+        rsvps: event.rsvps,
+        joinRequests: event.joinRequests,
       });
       broadcastRosterChanged(event);
-      socketService.emitToAll("events:refresh", { reason: "roster_leave", eventId });
+      socketService.emitToAll("events:refresh", {
+        reason: isBoot ? "roster_boot" : "roster_leave",
+        eventId,
+      });
 
-      return res.status(200).json({ success: true, roster: event.roster });
+      return res.status(200).json({
+        success: true,
+        roster: event.roster,
+        invitedUsers: event.invitedUsers || [],
+        removedUserIds: event.removedUserIds || [],
+        waitlist: event.waitlist || [],
+        rsvps: event.rsvps || [],
+        booted: isBoot,
+      });
     } catch (error) {
       console.error("Error removing participant from roster:", error);
       return res
@@ -1801,6 +2295,14 @@ router.put("/:id/rsvp", async (req: Request, res: Response) => {
       });
     }
 
+    if (isRemovedFromEvent(event, String(userId))) {
+      return res.status(403).json({
+        message:
+          "You've been removed from this event. Ask the host to invite you again.",
+        removed: true,
+      });
+    }
+
     const onRoster = event.roster.some((p: any) => p.userId === userId);
 
     if (status === "going") {
@@ -1808,6 +2310,7 @@ router.put("/:id/rsvp", async (req: Request, res: Response) => {
       // (respecting a spot briefly held for a waitlisted user).
       event.rsvps = event.rsvps.filter((r: any) => r.userId !== userId);
       if (!onRoster) {
+        expandCapacityForInvitedJoiner(event, String(userId));
         const reservationForOther =
           !!event.spotReservation &&
           event.spotReservation.userId !== userId &&
@@ -1879,6 +2382,7 @@ router.put("/:id/rsvp", async (req: Request, res: Response) => {
       rosterSpotsFilled: event.rosterSpotsFilled,
       rsvps: event.rsvps,
       spotReservation: event.spotReservation,
+      totalSpots: event.totalSpots,
     });
     // Push a targeted patch (privacy-scoped) so any client showing this
     // event's card — e.g. the organizer on the events list — updates its
@@ -1891,6 +2395,7 @@ router.put("/:id/rsvp", async (req: Request, res: Response) => {
       roster: event.roster,
       rsvps: event.rsvps,
       rosterSpotsFilled: event.rosterSpotsFilled,
+      totalSpots: event.totalSpots,
     });
   } catch (error) {
     console.error("Error updating RSVP:", error);
@@ -1952,6 +2457,13 @@ router.post("/:id/join-request", async (req: Request, res: Response) => {
       return res
         .status(403)
         .json({ message: "This event is not accepting join requests" });
+    }
+    if (isRemovedFromEvent(event, userId)) {
+      return res.status(403).json({
+        message:
+          "You've been removed from this event. Ask the host to invite you again.",
+        removed: true,
+      });
     }
     if (String(event.createdBy) === userId) {
       return res.status(400).json({ message: "You own this event" });
@@ -2024,6 +2536,7 @@ router.post(
         return res.status(400).json({ message: "Event is full", full: true });
       }
 
+      clearUserRemovedFromEvent(event, requesterId);
       event.roster.push({
         username: request.username,
         paidStatus: "Unpaid",
@@ -2165,6 +2678,13 @@ router.post("/:id/guest-add-request", async (req: Request, res: Response) => {
     if ((event.invitedUsers || []).includes(String(proposedUserId))) {
       return res.status(409).json({ message: "That person is already invited" });
     }
+    if (isRemovedFromEvent(event, String(proposedUserId))) {
+      return res.status(403).json({
+        message:
+          "That person was removed by the host and can only be re-invited by them",
+        removed: true,
+      });
+    }
     if (
       (event.roster || []).some(
         (p: any) => String(p.userId) === String(proposedUserId),
@@ -2248,12 +2768,14 @@ router.post(
       if (!event.invitedUsers) {
         event.invitedUsers = [];
       }
+      clearUserRemovedFromEvent(event, proposedUserId);
       if (!event.invitedUsers.includes(proposedUserId)) {
         event.invitedUsers.push(proposedUserId);
       }
       (event as any).guestAddRequests = requests.filter(
         (r: any) => String(r.proposedUserId) !== proposedUserId,
       );
+      expandCapacityForPendingInvites(event);
       await event.save();
 
       notificationService.sendPushNotification({
@@ -2283,6 +2805,7 @@ router.post(
         success: true,
         invitedUsers: event.invitedUsers,
         guestAddRequests: (event as any).guestAddRequests,
+        totalSpots: event.totalSpots,
       });
     } catch (error) {
       console.error("Error approving guest-add request:", error);
@@ -2430,6 +2953,12 @@ router.delete(
         date: { $gte: todayString },
       });
 
+      await demoteSingletonSeries(recurrenceGroupId);
+      socketService.emitToAll("events:refresh", {
+        reason: "series-deleted",
+        recurrenceGroupId,
+      });
+
       res.status(200).json({
         success: true,
         deletedCount: result.deletedCount,
@@ -2461,7 +2990,18 @@ router.delete("/:id", async (req: Request, res: Response) => {
         .status(403)
         .json({ message: "Only the event creator can delete this event" });
     }
+    const groupId = event.recurrenceGroupId
+      ? String(event.recurrenceGroupId)
+      : null;
     await Event.findByIdAndDelete(eventId);
+    if (groupId) {
+      await demoteSingletonSeries(groupId);
+    }
+    socketService.emitToAll("events:refresh", {
+      reason: "deleted",
+      eventId,
+      recurrenceGroupId: groupId || undefined,
+    });
     res.sendStatus(204);
   } catch (error) {
     res.status(500).json({ message: "Failed to delete event" });
@@ -2498,15 +3038,25 @@ router.post("/:eventId/invite", async (req: Request, res: Response) => {
 
     const newInvites: string[] = [];
     userIds.forEach((userId: string) => {
-      if (!event.invitedUsers.includes(userId)) {
-        event.invitedUsers.push(userId);
-        newInvites.push(userId);
+      const id = String(userId);
+      clearUserRemovedFromEvent(event, id);
+      if (!event.invitedUsers.includes(id)) {
+        event.invitedUsers.push(id);
+        newInvites.push(id);
       }
     });
 
+    expandCapacityForPendingInvites(event);
     await event.save();
 
     if (newInvites.length > 0) {
+      socketService.emitToEvent(event._id.toString(), "event:updated", {
+        event,
+      });
+      socketService.emitToAll("events:refresh", {
+        reason: "invite",
+        eventId: event._id.toString(),
+      });
       notificationService.sendPushNotificationToMany(
         newInvites,
         "Event Invitation 📩",
@@ -2523,7 +3073,9 @@ router.post("/:eventId/invite", async (req: Request, res: Response) => {
     res.status(200).json({
       success: true,
       invitedUsers: event.invitedUsers,
+      removedUserIds: event.removedUserIds || [],
       newlyInvited: newInvites.length,
+      totalSpots: event.totalSpots,
     });
   } catch (error) {
     console.error("Error inviting users to event:", error);
@@ -2669,10 +3221,19 @@ router.delete(
       }
 
       event.invitedUsers = (event.invitedUsers || []).filter(
-        (id) => id !== userId,
+        (id) => String(id) !== String(userId),
       );
 
       await event.save();
+
+      socketService.emitToEvent(eventId, "roster:updated", {
+        eventId,
+        roster: event.roster,
+        rosterSpotsFilled: event.rosterSpotsFilled,
+        waitlist: event.waitlist,
+        invitedUsers: event.invitedUsers,
+        rsvps: event.rsvps,
+      });
 
       res.status(200).json({
         success: true,
@@ -2868,12 +3429,58 @@ router.post("/:id/waitlist", async (req: Request, res: Response) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    if (event.roster.some((p: any) => p.userId === currentUser.id)) {
+    if (event.roster.some((p: any) => String(p.userId) === String(currentUser.id))) {
       return res.status(400).json({ message: "Already on the roster" });
     }
 
-    if (event.waitlist.some((w: any) => w.userId === currentUser.id)) {
+    if (event.waitlist.some((w: any) => String(w.userId) === String(currentUser.id))) {
       return res.status(409).json({ message: "Already on the waitlist" });
+    }
+
+    if (isRemovedFromEvent(event, String(currentUser.id))) {
+      return res.status(403).json({
+        message:
+          "You've been removed from this event. Ask the host to invite you again.",
+        removed: true,
+      });
+    }
+
+    // Host invitees should take a roster seat, not the waitlist — even if the
+    // client still thinks the event is full from a stale card.
+    expandCapacityForInvitedJoiner(event, String(currentUser.id));
+    if (!isRosterFull(event) && isInvitedToEvent(event, String(currentUser.id))) {
+      event.roster.push({
+        username: user.username,
+        paidStatus: "Unpaid",
+        userId: currentUser.id,
+        profilePicUrl: (user as any).profilePicUrl || undefined,
+      } as any);
+      event.rosterSpotsFilled = event.roster.length;
+      event.waitlist = event.waitlist.filter(
+        (w: any) => String(w.userId) !== String(currentUser.id),
+      );
+      event.rsvps = event.rsvps.filter(
+        (r: any) => String(r.userId) !== String(currentUser.id),
+      );
+      await event.save();
+      socketService.emitToEvent(req.params.id, "roster:updated", {
+        eventId: req.params.id,
+        roster: event.roster,
+        rosterSpotsFilled: event.rosterSpotsFilled,
+        spotReservation: event.spotReservation,
+        totalSpots: event.totalSpots,
+      });
+      broadcastRosterChanged(event);
+      socketService.emitToAll("events:refresh", {
+        reason: "invitee_join",
+        eventId: req.params.id,
+      });
+      return res.status(200).json({
+        success: true,
+        joinedRoster: true,
+        roster: event.roster,
+        totalSpots: event.totalSpots,
+      });
     }
 
     event.waitlist.push({

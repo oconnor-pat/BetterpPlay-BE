@@ -131,6 +131,7 @@ export type NotificationType =
   | "event_comment"
   | "event_join"
   | "event_leave"
+  | "event_removed"
   | "event_rsvp"
   | "event_rsvp_reminder"
   | "event_rating_prompt"
@@ -218,6 +219,7 @@ export const sendPushNotification = async (
         case "event_comment":
         case "event_join":
         case "event_leave":
+        case "event_removed":
         case "event_rsvp":
         case "event_join_request":
         case "event_join_approved":
