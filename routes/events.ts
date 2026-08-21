@@ -10,6 +10,7 @@ import socketService from "../services/socketService";
 import blockService from "../services/blockService";
 import { isValidEmoji } from "../utils/emoji";
 import { resolveEventStartsAt } from "../utils/eventDateTime";
+import { normalizeRosterForEventShape, resolveJoinParticipantFields } from "../utils/rosterNormalize";
 import Notification from "../models/notification";
 
 const router = Router();
@@ -720,6 +721,7 @@ router.post("/", async (req: Request, res: Response) => {
       venueName,
       groupId,
       sourceUrl,
+      trackPayment,
     } = req.body;
 
     if (
@@ -921,6 +923,7 @@ router.post("/", async (req: Request, res: Response) => {
       latitude: isVirtual === true ? undefined : latitude,
       longitude: isVirtual === true ? undefined : longitude,
       jerseyColors: jerseyColors || [],
+      trackPayment: trackPayment === true,
       privacy: eventPrivacy,
       invitedUsers: mergedInvitedUsers,
       allowJoinRequests: allowJoinRequests !== false,
@@ -1153,6 +1156,7 @@ router.put("/:id", async (req: Request, res: Response) => {
       recurrenceCount,
       startsAt,
       timezoneOffsetMinutes,
+      trackPayment,
     } = req.body;
 
     const event = await Event.findById(eventId);
@@ -1226,6 +1230,7 @@ router.put("/:id", async (req: Request, res: Response) => {
     if (longitude !== undefined && !event.isVirtual)
       event.longitude = longitude;
     if (jerseyColors !== undefined) event.jerseyColors = jerseyColors;
+    if (trackPayment !== undefined) event.trackPayment = trackPayment === true;
     if (allowJoinRequests !== undefined)
       event.allowJoinRequests = allowJoinRequests !== false;
     if (showLocationPublicly !== undefined)
@@ -1241,6 +1246,10 @@ router.put("/:id", async (req: Request, res: Response) => {
     if (invitedUsers !== undefined) {
       event.invitedUsers = invitedUsers;
     }
+
+    // Scrub jersey / position / paid fields when type or team settings change
+    // (e.g. Hockey → Other must not leave "Forward" / "Black" on players).
+    normalizeRosterForEventShape(event);
 
     await event.save();
 
@@ -1336,6 +1345,7 @@ router.put("/:id", async (req: Request, res: Response) => {
       latitude: (event as any).isVirtual ? undefined : event.latitude,
       longitude: (event as any).isVirtual ? undefined : event.longitude,
       jerseyColors: event.jerseyColors || [],
+      trackPayment: !!(event as any).trackPayment,
       privacy: event.privacy,
       invitedUsers: event.invitedUsers || [],
       allowJoinRequests: event.allowJoinRequests,
@@ -1441,6 +1451,7 @@ router.put("/:id", async (req: Request, res: Response) => {
           t.allowJoinRequests = event.allowJoinRequests;
           t.showLocationPublicly = event.showLocationPublicly;
           t.jerseyColors = event.jerseyColors || [];
+          (t as any).trackPayment = !!(event as any).trackPayment;
           t.isVirtual = !!(event as any).isVirtual;
           if (t.isVirtual) {
             t.latitude = null;
@@ -1468,6 +1479,7 @@ router.put("/:id", async (req: Request, res: Response) => {
           (t as any).timezoneOffsetMinutes = (
             event as any
           ).timezoneOffsetMinutes;
+          normalizeRosterForEventShape(t);
         };
 
         if (editScope !== "this") {
@@ -1811,7 +1823,15 @@ router.post("/:id/roster", async (req: Request, res: Response) => {
       });
     }
 
-    event.roster.push(entry);
+    const fields = resolveJoinParticipantFields(event, {
+      position: entry.position,
+      jerseyColor: entry.jerseyColor,
+      paidStatus: entry.paidStatus,
+    });
+    event.roster.push({
+      ...entry,
+      ...fields,
+    });
     event.rosterSpotsFilled = event.roster.length;
 
     // Clear reservation if this user was the reserved one
@@ -2267,7 +2287,8 @@ router.delete(
 // ever in one place, so switching states moves them between the two.
 router.put("/:id/rsvp", async (req: Request, res: Response) => {
   const eventId = req.params.id;
-  const { userId, username, profilePicUrl, status } = req.body;
+  const { userId, username, profilePicUrl, status, position, jerseyColor, paidStatus } =
+    req.body;
   if (
     !userId ||
     !username ||
@@ -2324,17 +2345,36 @@ router.put("/:id/rsvp", async (req: Request, res: Response) => {
         ) {
           return res.status(400).json({ message: "Event is full", full: true });
         }
+        const fields = resolveJoinParticipantFields(event, {
+          position,
+          jerseyColor,
+          paidStatus,
+        });
         event.roster.push({
           username,
-          paidStatus: "Unpaid",
           userId,
           profilePicUrl,
+          ...fields,
         } as any);
         event.rosterSpotsFilled = event.roster.length;
         if (event.spotReservation && event.spotReservation.userId === userId) {
           event.spotReservation = null;
         }
         event.waitlist = event.waitlist.filter((w: any) => w.userId !== userId);
+      } else {
+        // Already going — allow updating role/jersey/paid from the join prompt.
+        event.roster = event.roster.map((p: any) => {
+          if (String(p.userId) !== String(userId)) {
+            return p;
+          }
+          const plain = p?.toObject ? p.toObject() : {...p};
+          const fields = resolveJoinParticipantFields(event, {
+            position: position ?? plain.position,
+            jerseyColor: jerseyColor ?? plain.jerseyColor,
+            paidStatus: paidStatus ?? plain.paidStatus,
+          });
+          return {...plain, ...fields, username, profilePicUrl};
+        });
       }
     } else {
       // Maybe / can't: free their roster spot (promoting the waitlist if the

@@ -14,6 +14,7 @@ import {
   MAX_DISTINCT_REACTIONS_PER_MESSAGE,
   MAX_REACTIONS_PER_USER_PER_MESSAGE,
 } from "../utils/emoji";
+import {notifyMentions, resolveMentionedUsers} from "../utils/mentions";
 
 const router = Router();
 
@@ -672,18 +673,43 @@ router.post(
         const senderName =
           (sender as any)?.name || (sender as any)?.username || "Someone";
         const preview = text || "📷 Photo";
+        const recipientMentioned =
+          !!text &&
+          (
+            await resolveMentionedUsers(text, {
+              excludeUserId: userId,
+              allowedUserIds: [recipientId],
+            })
+          ).some((m) => m.userId === recipientId);
+
         if (conv.status === "accepted") {
-          notificationService.sendPushNotification({
-            userId: recipientId,
-            title: senderName,
-            body: preview,
-            type: "direct_message",
-            data: {
-              conversationId: String(conv._id),
-              senderId: String(userId),
-              senderName,
-            },
-          });
+          if (recipientMentioned) {
+            await notifyMentions({
+              text,
+              actorId: userId,
+              actorName: senderName,
+              mentionChannel: "dm",
+              allowedUserIds: [recipientId],
+              data: {
+                conversationId: String(conv._id),
+                senderId: String(userId),
+                senderName,
+                messageId: String(created._id),
+              },
+            });
+          } else {
+            notificationService.sendPushNotification({
+              userId: recipientId,
+              title: senderName,
+              body: preview,
+              type: "direct_message",
+              data: {
+                conversationId: String(conv._id),
+                senderId: String(userId),
+                senderName,
+              },
+            });
+          }
         } else if (isFirstMessage) {
           // Still pending: exactly one ping, on the opening message. Every
           // send after this is silent until they accept, so an unwanted

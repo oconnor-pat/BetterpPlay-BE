@@ -153,6 +153,7 @@ export type NotificationType =
   | "direct_message"
   | "message_request"
   | "direct_message_reaction"
+  | "mention"
   | "general";
 
 interface SendNotificationOptions {
@@ -267,6 +268,19 @@ export const sendPushNotification = async (
         case "direct_message_reaction":
           if (preferences.dmReactions === false) return false;
           break;
+        case "mention": {
+          // Mentions reuse the channel's existing mute so we don't need a
+          // new settings toggle for v1.
+          const channel = data?.mentionChannel;
+          if (channel === "group") {
+            if (preferences.groupMessages === false) return false;
+          } else if (channel === "dm") {
+            if (preferences.directMessages === false) return false;
+          } else if (channel === "community") {
+            if (!preferences.communityNotes) return false;
+          }
+          break;
+        }
       }
     }
 

@@ -11,6 +11,7 @@ import {
   MAX_DISTINCT_REACTIONS_PER_MESSAGE,
   MAX_REACTIONS_PER_USER_PER_MESSAGE,
 } from "../utils/emoji";
+import {notifyMentions} from "../utils/mentions";
 
 const router = Router();
 
@@ -379,6 +380,19 @@ router.post("/", async (req: Request, res: Response) => {
             },
           );
         }
+
+        await notifyMentions({
+          text,
+          actorId: userId,
+          actorName: username,
+          mentionChannel: "community",
+          skipUserIds: Array.from(notifyUserIds),
+          data: {
+            postId: newPost._id.toString(),
+            eventId: String(eventId),
+            eventName: eventName || "",
+          },
+        });
       }
     }
 
@@ -436,6 +450,7 @@ router.post(
       post.comments.push(comment);
       await post.save();
 
+      const alreadyNotified = new Set<string>();
       if (post.userId && post.userId !== userId) {
         notificationService.sendPushNotification({
           userId: post.userId,
@@ -449,6 +464,7 @@ router.post(
             commenterUsername: username,
           },
         });
+        alreadyNotified.add(String(post.userId));
       }
 
       if (post.eventId) {
@@ -470,8 +486,22 @@ router.post(
               eventName: linkedEvent.name,
             },
           });
+          alreadyNotified.add(String(linkedEvent.createdBy));
         }
       }
+
+      await notifyMentions({
+        text,
+        actorId: userId,
+        actorName: username,
+        mentionChannel: "community",
+        skipUserIds: Array.from(alreadyNotified),
+        data: {
+          postId: post._id.toString(),
+          eventId: post.eventId || "",
+          eventName: post.eventName || "",
+        },
+      });
 
       socketService.emitToEvent(post.eventId || "", "comments:updated", {
         postId: post._id.toString(),
@@ -563,6 +593,7 @@ router.post(
       });
       await post.save();
 
+      const alreadyNotified = new Set<string>();
       if (comment.userId && comment.userId !== userId) {
         notificationService.sendPushNotification({
           userId: comment.userId,
@@ -575,7 +606,21 @@ router.post(
             eventName: post.eventName || "",
           },
         });
+        alreadyNotified.add(String(comment.userId));
       }
+
+      await notifyMentions({
+        text,
+        actorId: userId,
+        actorName: username,
+        mentionChannel: "community",
+        skipUserIds: Array.from(alreadyNotified),
+        data: {
+          postId: post._id.toString(),
+          eventId: post.eventId || "",
+          eventName: post.eventName || "",
+        },
+      });
 
       socketService.emitToEvent(post.eventId || "", "comments:updated", {
         postId: post._id.toString(),

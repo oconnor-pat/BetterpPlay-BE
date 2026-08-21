@@ -252,7 +252,14 @@ router.get("/users", async (req: Request, res: Response) => {
 
       pipeline.push(
         { $addFields: { distance: { $divide: ["$distanceMeters", 1609.34] } } },
-        { $project: { distanceMeters: 0, password: 0 } },
+        {
+          $project: {
+            distanceMeters: 0,
+            password: 0,
+            location: 0,
+            email: 0,
+          },
+        },
       );
 
       users = await User.aggregate(pipeline);
@@ -326,15 +333,9 @@ router.get("/users", async (req: Request, res: Response) => {
           result.distance = user.distance;
         }
 
-        if (
-          user.location &&
-          user.location.coordinates &&
-          user.location.coordinates.length === 2
-        ) {
-          result.longitude = user.location.coordinates[0];
-          result.latitude = user.location.coordinates[1];
-        }
-
+        // Never expose other players' exact coordinates on discovery —
+        // distance is enough for Nearby. Own profile endpoints can still
+        // return location when needed.
         return result;
       }),
     );

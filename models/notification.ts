@@ -36,6 +36,7 @@ export interface INotification extends Document {
     | "direct_message"
     | "message_request"
     | "direct_message_reaction"
+    | "mention"
     | "general";
   data?: Record<string, any>;
   read: boolean;
@@ -93,6 +94,7 @@ const NotificationSchema: Schema = new Schema(
         "direct_message",
         "message_request",
         "direct_message_reaction",
+        "mention",
         "general",
       ],
       required: true,

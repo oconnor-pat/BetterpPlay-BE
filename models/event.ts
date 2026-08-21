@@ -178,6 +178,9 @@ export interface IEvent extends Document {
   // rather than a physical address — no map, no lat/lng.
   isVirtual?: boolean;
   jerseyColors?: string[];
+  // When true, hosts track Paid/Unpaid on the roster. Off by default —
+  // most pickup games don't need fee tracking chrome.
+  trackPayment?: boolean;
   // Superseded by `reactions` — a like is now a "❤️" reaction. Kept on the
   // model so events written before the migration still read cleanly and so
   // clients older than the reactions release keep working.
@@ -260,6 +263,7 @@ const EventSchema: Schema = new Schema(
     longitude: { type: Number, required: false },
     isVirtual: { type: Boolean, default: false },
     jerseyColors: { type: [String], default: [] }, // Team colors (for sports events)
+    trackPayment: { type: Boolean, default: false },
     likes: { type: [String], default: [] }, // Deprecated: mirrors "❤️" reactions
     reactions: { type: [ReactionSchema], default: [] },
     privacy: {

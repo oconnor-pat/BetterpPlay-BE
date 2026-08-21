@@ -13,6 +13,7 @@ import {
   MAX_DISTINCT_REACTIONS_PER_MESSAGE,
   MAX_REACTIONS_PER_USER_PER_MESSAGE,
 } from "../utils/emoji";
+import {notifyMentions, resolveMentionedUsers} from "../utils/mentions";
 
 const router = Router();
 
@@ -905,11 +906,22 @@ router.post("/:id/messages", async (req: Request, res: Response) => {
 
     // Push to members who aren't the sender and aren't actively watching
     // the thread (those get the live socket update instead). Skip anyone
-    // in a mutual block with the sender.
+    // in a mutual block with the sender. @mentioned members get a
+    // dedicated mention push instead of the generic group_message one.
     const inRoom = await socketService.getUserIdsInGroupRoom(String(group._id));
+    const mentioned = text
+      ? await resolveMentionedUsers(text, {
+          excludeUserId: userId,
+          allowedUserIds: memberIds,
+        })
+      : [];
+    const mentionedIds = new Set(mentioned.map((m) => m.userId));
     const pushTargets = memberIds.filter(
       (id) =>
-        id !== userId && !inRoom.has(id) && !hiddenWithSender.has(id),
+        id !== userId &&
+        !inRoom.has(id) &&
+        !hiddenWithSender.has(id) &&
+        !mentionedIds.has(id),
     );
     if (pushTargets.length > 0) {
       const senderName =
@@ -922,6 +934,28 @@ router.post("/:id/messages", async (req: Request, res: Response) => {
         "group_message",
         { groupId: String(group._id), groupName: group.name },
       );
+    }
+
+    if (mentioned.length > 0) {
+      const senderName =
+        (sender as any)?.name || (sender as any)?.username || "Someone";
+      const mentionTargets = mentioned
+        .map((m) => m.userId)
+        .filter((id) => !inRoom.has(id) && !hiddenWithSender.has(id));
+      if (mentionTargets.length > 0) {
+        await notifyMentions({
+          text,
+          actorId: userId,
+          actorName: senderName,
+          mentionChannel: "group",
+          allowedUserIds: mentionTargets,
+          data: {
+            groupId: String(group._id),
+            groupName: group.name,
+            messageId: String(created._id),
+          },
+        });
+      }
     }
 
     return res.status(201).json({ success: true, message });
