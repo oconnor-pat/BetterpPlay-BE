@@ -177,20 +177,32 @@ function expandCapacityForPendingInvites(event: any): boolean {
     return false;
   }
   event.totalSpots = needed;
+  event.markModified?.("totalSpots");
   return true;
 }
 
 // Invites sent before capacity was expanded: if an invitee tries to join a
 // full event, give them the extra seat instead of "event is full".
 function expandCapacityForInvitedJoiner(event: any, userId: string): boolean {
-  if (isUnlimitedSpots(event.totalSpots) || !isRosterFull(event)) {
+  if (isUnlimitedSpots(event.totalSpots)) {
     return false;
   }
   if (!isInvitedToEvent(event, userId)) {
     return false;
   }
-  event.totalSpots = event.roster.length + 1;
-  return true;
+  // Always ensure at least one seat for this invitee (even if FE still
+  // thinks the event is full and hits the waitlist endpoint).
+  if (event.roster.length >= event.totalSpots) {
+    event.totalSpots = event.roster.length + 1;
+    event.markModified?.("totalSpots");
+    return true;
+  }
+  return false;
+}
+
+/** True if this user is a host invitee who should take a roster seat. */
+function shouldInviteeTakeRosterSeat(event: any, userId: string): boolean {
+  return isInvitedToEvent(event, userId) && !isRemovedFromEvent(event, userId);
 }
 
 // Unique userId → an affected event they're on (roster, invite, or waitlist).
@@ -614,10 +626,72 @@ router.get("/", async (req: Request, res: Response) => {
         : undefined,
     }));
 
+    // Friend social-proof for LFG/public cards. Even gated teasers hide the
+    // full roster, but we still surface friends (and for creators, friends who
+    // inquired) so cards can show "people you know are in."
+    const FRIENDS_PREVIEW_LIMIT = 5;
+    const viewerFriendIds = new Set<string>();
+    const friendUserById = new Map<string, any>();
+    if (currentUserId) {
+      const me = await User.findById(currentUserId).select("friends").lean();
+      const fids = ((me as any)?.friends || []).map((id: any) => String(id));
+      fids.forEach((id: string) => viewerFriendIds.add(id));
+      if (fids.length > 0) {
+        const friendUsers = await User.find({ _id: { $in: fids } })
+          .select("username name profilePicUrl")
+          .lean();
+        friendUsers.forEach((u: any) => {
+          friendUserById.set(String(u._id), u);
+        });
+      }
+    }
+
+    const buildFriendsPreview = (
+      entries: any[],
+      idKey: string,
+      usernameKey: string,
+    ) => {
+      const preview: any[] = [];
+      const seen = new Set<string>();
+      for (const entry of entries || []) {
+        const id = entry?.[idKey] ? String(entry[idKey]) : "";
+        if (!id || !viewerFriendIds.has(id) || seen.has(id)) {
+          continue;
+        }
+        seen.add(id);
+        const u = friendUserById.get(id);
+        preview.push({
+          userId: id,
+          username: u?.username || entry[usernameKey],
+          name: u?.name,
+          profilePicUrl: u?.profilePicUrl || entry.profilePicUrl,
+        });
+        if (preview.length >= FRIENDS_PREVIEW_LIMIT) {
+          break;
+        }
+      }
+      return preview;
+    };
+
     // Gate public events per-viewer: locked ones collapse to a teaser.
-    const projected = eventsWithLikedBy.map((event: any) =>
-      projectEventForViewer(event, currentUserId ? String(currentUserId) : null),
-    );
+    const projected = eventsWithLikedBy.map((event: any) => {
+      const viewer = currentUserId ? String(currentUserId) : null;
+      const isCreator =
+        !!viewer && String(event.createdBy) === String(viewer);
+      const friendsOnRoster = buildFriendsPreview(
+        event.roster || [],
+        "userId",
+        "username",
+      );
+      const friendsInquired = isCreator
+        ? buildFriendsPreview(event.joinRequests || [], "userId", "username")
+        : [];
+      return {
+        ...projectEventForViewer(event, viewer),
+        friendsOnRoster,
+        friendsInquired,
+      };
+    });
 
     res.status(200).json(projected);
   } catch (error) {
@@ -722,6 +796,7 @@ router.post("/", async (req: Request, res: Response) => {
       groupId,
       sourceUrl,
       trackPayment,
+      creatorRoster,
     } = req.body;
 
     if (
@@ -890,6 +965,26 @@ router.post("/", async (req: Request, res: Response) => {
       });
     }
 
+
+    // Creator always starts on the roster. The FE prompts for role / jersey /
+    // paid at create time and sends `creatorRoster`; fall back to defaults.
+    const creatorFields = resolveJoinParticipantFields(
+      {
+        eventType,
+        jerseyColors: jerseyColors || [],
+        trackPayment: trackPayment === true,
+      },
+      creatorRoster && typeof creatorRoster === "object" ? creatorRoster : {},
+    );
+    const creatorRosterEntry = {
+      userId: String(user._id),
+      username: user.username,
+      profilePicUrl: (user as any).profilePicUrl,
+      position: creatorFields.position,
+      jerseyColor: creatorFields.jerseyColor,
+      paidStatus: creatorFields.paidStatus,
+    };
+
     const storedDate = toIsoDate(date);
     const offsetMinutes =
       typeof timezoneOffsetMinutes === "number"
@@ -918,8 +1013,8 @@ router.post("/", async (req: Request, res: Response) => {
       eventType,
       createdBy,
       createdByUsername: createdByUsername || user.username,
-      rosterSpotsFilled: 0,
-      roster: [],
+      rosterSpotsFilled: 1,
+      roster: [creatorRosterEntry],
       latitude: isVirtual === true ? undefined : latitude,
       longitude: isVirtual === true ? undefined : longitude,
       jerseyColors: jerseyColors || [],
@@ -1242,9 +1337,13 @@ router.put("/:id", async (req: Request, res: Response) => {
         event.privacy = privacy;
       }
     }
-    const previousInvitedUsers = [...(event.invitedUsers || [])];
+    const previousInvitedUsers = [...(event.invitedUsers || [])].map(String);
     if (invitedUsers !== undefined) {
-      event.invitedUsers = invitedUsers;
+      event.invitedUsers = (invitedUsers || []).map(String);
+      for (const id of event.invitedUsers) {
+        clearUserRemovedFromEvent(event, id);
+      }
+      expandCapacityForPendingInvites(event);
     }
 
     // Scrub jersey / position / paid fields when type or team settings change
@@ -1254,14 +1353,10 @@ router.put("/:id", async (req: Request, res: Response) => {
     await event.save();
 
     if (invitedUsers !== undefined) {
-      const newlyInvited = invitedUsers.filter(
-        (id: string) => !previousInvitedUsers.includes(id),
-      );
-      for (const id of newlyInvited) {
-        clearUserRemovedFromEvent(event, id);
-      }
+      const newlyInvited = (event.invitedUsers || [])
+        .map(String)
+        .filter((id: string) => id && !previousInvitedUsers.includes(id));
       if (newlyInvited.length > 0) {
-        await event.save();
         const currentUser = (req as any).user;
         notificationService.sendPushNotificationToMany(
           newlyInvited,
@@ -2809,7 +2904,11 @@ router.post(
         event.invitedUsers = [];
       }
       clearUserRemovedFromEvent(event, proposedUserId);
-      if (!event.invitedUsers.includes(proposedUserId)) {
+      if (
+        !(event.invitedUsers || []).some(
+          (x: any) => String(x) === proposedUserId,
+        )
+      ) {
         event.invitedUsers.push(proposedUserId);
       }
       (event as any).guestAddRequests = requests.filter(
@@ -3080,7 +3179,10 @@ router.post("/:eventId/invite", async (req: Request, res: Response) => {
     userIds.forEach((userId: string) => {
       const id = String(userId);
       clearUserRemovedFromEvent(event, id);
-      if (!event.invitedUsers.includes(id)) {
+      const already = (event.invitedUsers || []).some(
+        (x: any) => String(x) === id,
+      );
+      if (!already) {
         event.invitedUsers.push(id);
         newInvites.push(id);
       }
@@ -3487,21 +3589,32 @@ router.post("/:id/waitlist", async (req: Request, res: Response) => {
 
     // Host invitees should take a roster seat, not the waitlist — even if the
     // client still thinks the event is full from a stale card.
-    expandCapacityForInvitedJoiner(event, String(currentUser.id));
-    if (!isRosterFull(event) && isInvitedToEvent(event, String(currentUser.id))) {
+    const joinerId = String(currentUser.id || currentUser._id || "");
+    if (joinerId && shouldInviteeTakeRosterSeat(event, joinerId)) {
+      expandCapacityForInvitedJoiner(event, joinerId);
+      if (
+        !isUnlimitedSpots(event.totalSpots) &&
+        event.roster.length >= event.totalSpots
+      ) {
+        event.totalSpots = event.roster.length + 1;
+      }
+      const fields = resolveJoinParticipantFields(event, {});
       event.roster.push({
         username: user.username,
-        paidStatus: "Unpaid",
-        userId: currentUser.id,
+        userId: joinerId,
         profilePicUrl: (user as any).profilePicUrl || undefined,
+        ...fields,
       } as any);
       event.rosterSpotsFilled = event.roster.length;
       event.waitlist = event.waitlist.filter(
-        (w: any) => String(w.userId) !== String(currentUser.id),
+        (w: any) => String(w.userId) !== joinerId,
       );
       event.rsvps = event.rsvps.filter(
-        (r: any) => String(r.userId) !== String(currentUser.id),
+        (r: any) => String(r.userId) !== joinerId,
       );
+      if (event.spotReservation && String(event.spotReservation.userId) === joinerId) {
+        event.spotReservation = null;
+      }
       await event.save();
       socketService.emitToEvent(req.params.id, "roster:updated", {
         eventId: req.params.id,

@@ -37,10 +37,10 @@ const POSITION_OPTIONS: Record<string, string[]> = {
   Volleyball: ["Setter", "Outside Hitter", "Middle Blocker", "Libero"],
   "Trivia Night": ["Player", "Team Captain", "Host"],
   "Game Night": ["Player", "Host"],
+  "Video Games": ["Player", "Host", "Spectator"],
   Karaoke: ["Singer", "Audience"],
   "Open Mic": ["Performer", "Audience"],
   "Watch Party": ["Attendee", "Host"],
-  "Live Music": ["Attendee"],
   Hiking: ["Hiker", "Guide"],
   Cycling: ["Cyclist", "Guide"],
   Running: ["Runner", "Pacer"],
@@ -52,8 +52,14 @@ const POSITION_OPTIONS: Record<string, string[]> = {
   Meetup: ["Attendee", "Organizer"],
   Potluck: ["Guest", "Host"],
   Volunteer: ["Volunteer", "Coordinator"],
-  Other: ["Participant"],
-  Default: ["Participant"],
+  "Comedy Show": ["Attendee", "Performer", "Host"],
+  Party: ["Guest", "Host"],
+  Hangout: ["Attendee", "Host"],
+  Concert: ["Attendee", "Host"],
+  Food: ["Guest", "Host"],
+  "Live Music": ["Attendee", "Host"],
+  Other: ["Participant", "Host"],
+  Default: ["Participant", "Host"],
 };
 
 export const isTeamSportType = (eventType?: string | null): boolean =>
