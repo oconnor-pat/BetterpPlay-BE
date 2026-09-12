@@ -399,7 +399,11 @@ router.get("/auth/validate", async (req: Request, res: Response) => {
         _id: user._id,
         username: user.username,
         email: user.email,
+        name: user.name,
         profilePicUrl: user.profilePicUrl,
+        isAdmin: user.isAdmin === true,
+        accountType: (user as any).accountType || "user",
+        managedVenue: (user as any).managedVenue || null,
       },
     });
   } catch (error) {

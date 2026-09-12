@@ -21,6 +21,7 @@ import dmRoutes from "./routes/dm";
 import blockRoutes from "./routes/blocks";
 import reportRoutes from "./routes/reports";
 import playerRatingRoutes from "./routes/playerRatings";
+import venueRoutes from "./routes/venues";
 
 const app: Application = express();
 const httpServer = createServer(app);
@@ -74,6 +75,7 @@ app.use("/dm", dmRoutes);
 app.use(blockRoutes);
 app.use(reportRoutes);
 app.use(playerRatingRoutes);
+app.use(venueRoutes);
 
 const PORT = process.env.PORT || 8001;
 

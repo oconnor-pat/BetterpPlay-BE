@@ -172,8 +172,14 @@ const serializeConversation = (
     otherUser: {
       userId: otherId,
       username: otherUser?.username,
-      name: otherUser?.name,
+      name:
+        otherUser?.accountType === "venue"
+          ? otherUser?.managedVenue?.name ||
+            otherUser?.name ||
+            otherUser?.username
+          : otherUser?.name,
       profilePicUrl: otherUser?.profilePicUrl,
+      accountType: otherUser?.accountType === "venue" ? "venue" : "user",
     },
     lastMessage: conv.lastMessage
       ? {
@@ -213,7 +219,7 @@ const serializeConversations = async (
   const otherIds = convs.map((c) => otherParticipant(c, userId));
   const users = await User.find(
     { _id: { $in: otherIds } },
-    "username name profilePicUrl",
+    "username name profilePicUrl accountType managedVenue",
   ).lean();
   const byId = new Map<string, any>(users.map((u: any) => [String(u._id), u]));
   const counts = await Promise.all(convs.map((c) => countUnread(c, userId)));
@@ -275,7 +281,7 @@ router.post("/conversations", async (req: Request, res: Response) => {
 
   try {
     const target = await User.findById(targetId)
-      .select("username name profilePicUrl")
+      .select("username name profilePicUrl accountType managedVenue")
       .lean();
     if (!target) {
       return res.status(404).json({ message: "User not found" });
@@ -503,7 +509,7 @@ router.get("/conversations/:id", async (req: Request, res: Response) => {
     if (!conv) return;
 
     const other = await User.findById(otherParticipant(conv, userId))
-      .select("username name profilePicUrl")
+      .select("username name profilePicUrl accountType managedVenue")
       .lean();
     const unreadCount = await countUnread(conv, userId);
 
@@ -616,7 +622,7 @@ router.post(
       const isFirstMessage = !conv.lastMessageAt;
 
       const sender = await User.findById(userId)
-        .select("username name profilePicUrl")
+        .select("username name profilePicUrl accountType managedVenue")
         .lean();
 
       const created = await DirectMessage.create({
@@ -914,7 +920,7 @@ router.get(
 
       const raw = (message.reactions || []) as any[];
       const users = await User.find({ _id: { $in: raw.map((r) => r.userId) } })
-        .select("username name profilePicUrl")
+        .select("username name profilePicUrl accountType managedVenue")
         .lean();
       const byId = new Map(users.map((u: any) => [String(u._id), u]));
 

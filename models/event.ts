@@ -221,6 +221,12 @@ export interface IEvent extends Document {
   // re-fetching Place Details for every event card.
   venueId?: string;
   venueName?: string;
+  /**
+   * Who authored the card for feed presentation.
+   * - `user` (default): neighbor / friend-created hang
+   * - `venue`: official post from a venue business account
+   */
+  source?: "user" | "venue";
   // Optional reference to a Group used as the invite list at creation
   // time. For one-off events this is metadata about origin only — the
   // actual roster lives in `invitedUsers`, which is seeded from the
@@ -288,6 +294,12 @@ const EventSchema: Schema = new Schema(
     // Indexed because the venue detail page queries by venueId.
     venueId: { type: String, required: false, index: true },
     venueName: { type: String, required: false },
+    source: {
+      type: String,
+      enum: ["user", "venue"],
+      default: "user",
+      index: true,
+    },
     // Group reference (Mongo _id) + cached display name. Indexed so we
     // can look up "all events created from group X" cheaply, which PR 3
     // and any future "this group's events" view will need.

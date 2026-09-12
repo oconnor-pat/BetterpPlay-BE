@@ -449,7 +449,13 @@ router.get("/", async (req: Request, res: Response) => {
       venueId,
       lat: latRaw,
       lng: lngRaw,
-    } = req.query as { venueId?: string; lat?: string; lng?: string };
+      source: sourceRaw,
+    } = req.query as {
+      venueId?: string;
+      lat?: string;
+      lng?: string;
+      source?: string;
+    };
 
     const lat = latRaw ? parseFloat(latRaw) : NaN;
     const lng = lngRaw ? parseFloat(lngRaw) : NaN;
@@ -472,13 +478,24 @@ router.get("/", async (req: Request, res: Response) => {
 
     const allEvents = await Event.find(baseQuery).lean();
 
+    // Optional feed split: venue-hosted nights vs neighbor-created hangs.
+    // Missing `source` on legacy rows is treated as a user post.
+    const sourceFilter =
+      sourceRaw === "venue" || sourceRaw === "user" ? sourceRaw : null;
+    const sourceFilteredEvents = sourceFilter
+      ? allEvents.filter((event: any) => {
+          const src = event.source === "venue" ? "venue" : "user";
+          return src === sourceFilter;
+        })
+      : allEvents;
+
     // Events created by someone blocked in either direction drop out of
     // the feed entirely, before any privacy rules are considered.
     const hiddenIds = currentUserId
       ? await blockService.getHiddenUserIds(String(currentUserId))
       : new Set<string>();
 
-    const visibleEvents = allEvents.filter((event: any) => {
+    const visibleEvents = sourceFilteredEvents.filter((event: any) => {
       if (hiddenIds.has(String(event.createdBy))) {
         return false;
       }
@@ -886,8 +903,63 @@ router.post("/", async (req: Request, res: Response) => {
       return res.status(400).json({ message: "Invalid user ID" });
     }
 
+    // Venue business accounts post official nights: stamp source + force the
+    // managed Place onto the event so cards brand correctly in the feed.
+    const isVenueAccount =
+      (user as any).accountType === "venue" &&
+      !!(user as any).managedVenue?.placeId;
+    const managedVenue = isVenueAccount
+      ? ((user as any).managedVenue as {
+          placeId: string;
+          name: string;
+          photoUrl?: string;
+          address?: string;
+          latitude?: number;
+          longitude?: number;
+        })
+      : null;
+    const eventSource: "user" | "venue" = isVenueAccount ? "venue" : "user";
+    const resolvedVenueId =
+      isVenueAccount && managedVenue
+        ? managedVenue.placeId
+        : isVirtual === true
+          ? undefined
+          : venueId || undefined;
+    const resolvedVenueName =
+      isVenueAccount && managedVenue
+        ? managedVenue.name
+        : isVirtual === true
+          ? undefined
+          : venueName || undefined;
+    // Venue nights are meant for walk-up discovery — default to open join
+    // unless the manager explicitly asked for approval gating.
+    const resolvedAllowJoinRequests = isVenueAccount
+      ? allowJoinRequests === true
+      : allowJoinRequests !== false;
+    const resolvedShowLocationPublicly = isVenueAccount
+      ? showLocationPublicly !== false
+      : showLocationPublicly === true;
+    // Prefer the venue's pin when the client didn't send coords.
+    const resolvedLatitude =
+      isVirtual === true
+        ? undefined
+        : latitude ?? managedVenue?.latitude;
+    const resolvedLongitude =
+      isVirtual === true
+        ? undefined
+        : longitude ?? managedVenue?.longitude;
+    const resolvedLocation =
+      isVenueAccount && managedVenue && (!location || location.trim() === "")
+        ? managedVenue.address || managedVenue.name
+        : location;
+
     const validPrivacy = ["public", "private", "invite-only"];
-    const eventPrivacy = validPrivacy.includes(privacy) ? privacy : "public";
+    // Venue feed posts stay public so locals can discover them.
+    const eventPrivacy = isVenueAccount
+      ? "public"
+      : validPrivacy.includes(privacy)
+        ? privacy
+        : "public";
 
     // Snapshot a Group's members into `invitedUsers` if one was attached.
     // The FE may have already merged the group members on its side, but
@@ -1006,7 +1078,7 @@ router.post("/", async (req: Request, res: Response) => {
 
     const baseEventData = {
       name,
-      location,
+      location: resolvedLocation,
       time,
       durationMinutes: normalizeDuration(durationMinutes),
       totalSpots: spots,
@@ -1015,22 +1087,23 @@ router.post("/", async (req: Request, res: Response) => {
       createdByUsername: createdByUsername || user.username,
       rosterSpotsFilled: 1,
       roster: [creatorRosterEntry],
-      latitude: isVirtual === true ? undefined : latitude,
-      longitude: isVirtual === true ? undefined : longitude,
+      latitude: resolvedLatitude,
+      longitude: resolvedLongitude,
       jerseyColors: jerseyColors || [],
       trackPayment: trackPayment === true,
       privacy: eventPrivacy,
       invitedUsers: mergedInvitedUsers,
-      allowJoinRequests: allowJoinRequests !== false,
-      showLocationPublicly: showLocationPublicly === true,
+      allowJoinRequests: resolvedAllowJoinRequests,
+      showLocationPublicly: resolvedShowLocationPublicly,
       isVirtual: isVirtual === true,
       timezoneOffsetMinutes: Number.isFinite(offsetMinutes as number)
         ? (offsetMinutes as number)
         : undefined,
       // Optional venue listing reference (set when a user planned this event
-      // from the Venues tab via "Plan event from this page").
-      venueId: isVirtual === true ? undefined : venueId || undefined,
-      venueName: isVirtual === true ? undefined : venueName || undefined,
+      // from the Venues tab, or forced for venue business accounts).
+      venueId: resolvedVenueId,
+      venueName: resolvedVenueName,
+      source: eventSource,
       // Optional Group reference (set when a user picked "Invite a group"
       // during event creation). Powers the "via [Group]" badge.
       groupId: resolvedGroupId,
@@ -1559,6 +1632,7 @@ router.put("/:id", async (req: Request, res: Response) => {
             t.venueId = event.venueId;
             t.venueName = event.venueName;
           }
+          (t as any).source = (event as any).source || "user";
           t.invitedUsers = event.invitedUsers || [];
           t.groupId = event.groupId;
           t.groupName = event.groupName;
@@ -2152,6 +2226,11 @@ function projectEventForViewer(event: any, viewerId: string | null): any {
       createdAt: event.createdAt,
       likes: event.likes || [],
       reactions: event.reactions || [],
+      // Keep venue branding on gated teasers so official nights still read
+      // as venue-hosted before someone joins.
+      source: event.source === "venue" ? "venue" : "user",
+      venueId: event.venueId,
+      venueName: event.venueName,
       isGated: true,
       myJoinRequestStatus: pending ? "pending" : "none",
       roster: [],

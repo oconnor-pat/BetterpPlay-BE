@@ -157,50 +157,77 @@ router.get("/", async (req: Request, res: Response) => {
       })),
     );
 
-    const userPicMap = new Map<string, string>();
-    const userNameMap = new Map<string, string>();
+    const userMetaMap = new Map<
+      string,
+      {
+        profilePicUrl: string;
+        username: string;
+        name: string;
+        accountType: "user" | "venue";
+      }
+    >();
     users.forEach((u: any) => {
-      userPicMap.set(u._id.toString(), u.profilePicUrl || "");
-      userNameMap.set(u._id.toString(), u.username || "");
+      const isVenue = u.accountType === "venue";
+      userMetaMap.set(u._id.toString(), {
+        profilePicUrl: u.profilePicUrl || "",
+        username: u.username || "",
+        name: isVenue
+          ? u.managedVenue?.name || u.name || u.username || ""
+          : u.name || "",
+        accountType: isVenue ? "venue" : "user",
+      });
     });
 
-    console.log("🗺️ User map entries:", Object.fromEntries(userPicMap));
+    console.log(
+      "🗺️ User map entries:",
+      Object.fromEntries(
+        [...userMetaMap.entries()].map(([id, m]) => [
+          id,
+          m.profilePicUrl || "NO_PIC",
+        ]),
+      ),
+    );
 
     const getLikedByUsernames = (likes: string[] | undefined): string[] => {
       if (!likes || likes.length === 0) return [];
       return likes
-        .map((id) => userNameMap.get(String(id)))
+        .map((id) => userMetaMap.get(String(id))?.username)
         .filter((name): name is string => !!name);
+    };
+
+    const authorFields = (userId: string) => {
+      const meta = userMetaMap.get(String(userId));
+      return {
+        profilePicUrl: meta?.profilePicUrl || "",
+        name: meta?.name || undefined,
+        accountType: meta?.accountType || "user",
+      };
     };
 
     const postsWithPhotos = posts.map((post: any) => {
       const postUserId = String(post.userId);
-      const postPic = userPicMap.get(postUserId) || "";
+      const fields = authorFields(postUserId);
       console.log(
         `📸 Post by ${post.username} (${postUserId}): pic = ${
-          postPic ? "YES" : "NO"
+          fields.profilePicUrl ? "YES" : "NO"
         }`,
       );
 
       return {
         ...post,
-        profilePicUrl: postPic,
+        ...fields,
         likedByUsernames: getLikedByUsernames(post.likes),
         reactions: serializeReactions(post),
         comments: post.comments?.map((comment: any) => {
-          const commentUserId = String(comment.userId);
-          const commentPic = userPicMap.get(commentUserId) || "";
           return {
             ...comment,
-            profilePicUrl: commentPic,
+            ...authorFields(String(comment.userId)),
             likedByUsernames: getLikedByUsernames(comment.likes),
             reactions: serializeReactions(comment),
             replies: comment.replies?.map((reply: any) => {
-              const replyUserId = String(reply.userId);
-              const replyPic = userPicMap.get(replyUserId) || "";
               return {
                 ...reply,
-                profilePicUrl: replyPic,
+                ...authorFields(String(reply.userId)),
                 likedByUsernames: getLikedByUsernames(reply.likes),
                 reactions: serializeReactions(reply),
               };
@@ -279,39 +306,58 @@ router.get(
 
       const users = await User.find({ _id: { $in: objectIds } }).lean();
 
-      const userPicMap = new Map<string, string>();
-      const userNameMap = new Map<string, string>();
+      const userMetaMap = new Map<
+        string,
+        {
+          profilePicUrl: string;
+          username: string;
+          name: string;
+          accountType: "user" | "venue";
+        }
+      >();
       users.forEach((u: any) => {
-        userPicMap.set(u._id.toString(), u.profilePicUrl || "");
-        userNameMap.set(u._id.toString(), u.username || "");
+        const isVenue = u.accountType === "venue";
+        userMetaMap.set(u._id.toString(), {
+          profilePicUrl: u.profilePicUrl || "",
+          username: u.username || "",
+          name: isVenue
+            ? u.managedVenue?.name || u.name || u.username || ""
+            : u.name || "",
+          accountType: isVenue ? "venue" : "user",
+        });
       });
 
       const getLikedByUsernames = (likes: string[] | undefined): string[] => {
         if (!likes || likes.length === 0) return [];
         return likes
-          .map((id) => userNameMap.get(String(id)))
+          .map((id) => userMetaMap.get(String(id))?.username)
           .filter((name): name is string => !!name);
+      };
+
+      const authorFields = (userId: string) => {
+        const meta = userMetaMap.get(String(userId));
+        return {
+          profilePicUrl: meta?.profilePicUrl || "",
+          name: meta?.name || undefined,
+          accountType: meta?.accountType || "user",
+        };
       };
 
       const postWithDetails = {
         ...(post as any),
-        profilePicUrl: userPicMap.get(String((post as any).userId)) || "",
+        ...authorFields(String((post as any).userId)),
         likedByUsernames: getLikedByUsernames((post as any).likes),
         reactions: serializeReactions(post),
         comments: (post as any).comments?.map((comment: any) => {
-          const commentUserId = String(comment.userId);
-          const commentPic = userPicMap.get(commentUserId) || "";
           return {
             ...comment,
-            profilePicUrl: commentPic,
+            ...authorFields(String(comment.userId)),
             likedByUsernames: getLikedByUsernames(comment.likes),
             reactions: serializeReactions(comment),
             replies: comment.replies?.map((reply: any) => {
-              const replyUserId = String(reply.userId);
-              const replyPic = userPicMap.get(replyUserId) || "";
               return {
                 ...reply,
-                profilePicUrl: replyPic,
+                ...authorFields(String(reply.userId)),
                 likedByUsernames: getLikedByUsernames(reply.likes),
                 reactions: serializeReactions(reply),
               };

@@ -1,5 +1,15 @@
 import mongoose, { Document, Schema } from "mongoose";
 
+/** Google Place a venue-account manager is allowed to post for. */
+export interface IManagedVenue {
+  placeId: string;
+  name: string;
+  photoUrl?: string;
+  address?: string;
+  latitude?: number;
+  longitude?: number;
+}
+
 export interface IUser extends Document {
   name: string;
   email: string;
@@ -12,6 +22,12 @@ export interface IUser extends Document {
   profilePicUrl: string;
   tokenVersion: number;
   isAdmin: boolean;
+  /**
+   * `venue` accounts post official nights for a claimed Place (managedVenue).
+   * Default remains a normal consumer account.
+   */
+  accountType: "user" | "venue";
+  managedVenue?: IManagedVenue | null;
   favoriteActivities: string[];
   friends: mongoose.Types.ObjectId[];
   friendRequestsSent: mongoose.Types.ObjectId[];
@@ -34,7 +50,24 @@ const UserSchema: Schema = new Schema(
     authProviders: { type: [String], default: [] },
     profilePicUrl: { type: String }, // URL of the user's profile picture stored in S3
     tokenVersion: { type: Number, default: 0 }, // Increment to invalidate all tokens
-    isAdmin: { type: Boolean, default: false }, // Admin flag for venue management
+    isAdmin: { type: Boolean, default: false }, // App moderation / partner tooling
+    accountType: {
+      type: String,
+      enum: ["user", "venue"],
+      default: "user",
+    },
+    managedVenue: {
+      type: {
+        placeId: { type: String, required: true },
+        name: { type: String, required: true },
+        photoUrl: { type: String, required: false },
+        address: { type: String, required: false },
+        latitude: { type: Number, required: false },
+        longitude: { type: Number, required: false },
+      },
+      required: false,
+      default: null,
+    },
     favoriteActivities: { type: [String], default: [] }, // User's favorite activities
     friends: [{ type: Schema.Types.ObjectId, ref: "Users", default: [] }],
     friendRequestsSent: [
