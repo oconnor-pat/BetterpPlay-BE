@@ -2238,9 +2238,16 @@ function projectEventForViewer(event: any, viewerId: string | null): any {
       waitlist: [],
       joinRequests: [],
     };
-    // Optionally reveal the location/map on the public teaser if the creator
-    // opted in; everything else stays hidden until approval.
-    if (event.showLocationPublicly === true) {
+    // Venue nights always surface Place address/coords on the teaser so
+    // walk-up discovery can open directions. LFG / public user events only
+    // reveal location when the creator opted into `showLocationPublicly`
+    // (address text only — no forced map navigation on those).
+    if (event.source === "venue") {
+      teaser.location = event.location;
+      teaser.latitude = event.latitude;
+      teaser.longitude = event.longitude;
+      teaser.showLocationPublicly = true;
+    } else if (event.showLocationPublicly === true) {
       teaser.location = event.location;
       teaser.latitude = event.latitude;
       teaser.longitude = event.longitude;

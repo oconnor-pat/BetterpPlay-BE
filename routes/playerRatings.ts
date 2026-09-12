@@ -94,6 +94,15 @@ router.post("/user/:id/player-rating", async (req: Request, res: Response) => {
       return res.status(403).json({ message: "You can't rate this player" });
     }
 
+    const ratee = await User.findById(rateeId)
+      .select("accountType")
+      .lean();
+    if ((ratee as any)?.accountType === "venue") {
+      return res.status(403).json({
+        message: "Venue accounts can't be rated as players",
+      });
+    }
+
     const score = clampScore(req.body?.score);
     if (score === null) {
       return res
@@ -163,6 +172,18 @@ router.get(
       const raterId = String(currentUser.id);
 
       if (rateeId === raterId) {
+        return res.status(200).json({
+          success: true,
+          canRate: false,
+          rated: false,
+          rating: null,
+        });
+      }
+
+      const ratee = await User.findById(rateeId)
+        .select("accountType")
+        .lean();
+      if ((ratee as any)?.accountType === "venue") {
         return res.status(200).json({
           success: true,
           canRate: false,

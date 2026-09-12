@@ -178,7 +178,17 @@ const serializeConversation = (
             otherUser?.name ||
             otherUser?.username
           : otherUser?.name,
-      profilePicUrl: otherUser?.profilePicUrl,
+      profilePicUrl:
+        otherUser?.accountType === "venue"
+          ? otherUser?.managedVenue?.photoUrl ||
+            otherUser?.profilePicUrl ||
+            undefined
+          : otherUser?.profilePicUrl,
+      // Lets the client resolve a Places photo when photoUrl was never saved.
+      placeId:
+        otherUser?.accountType === "venue"
+          ? otherUser?.managedVenue?.placeId || undefined
+          : undefined,
       accountType: otherUser?.accountType === "venue" ? "venue" : "user",
     },
     lastMessage: conv.lastMessage

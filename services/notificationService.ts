@@ -296,12 +296,22 @@ export const sendPushNotification = async (
       });
     }
 
+    // Icon badge must mirror unread inbox count — never a hardcoded 1,
+    // or iOS keeps a stale badge after everything is read.
+    const unreadCount = await Notification.countDocuments({
+      userId,
+      read: false,
+    });
+
     // Push real-time update via WebSocket
     socketService.emitToUser(userId, "notification:new", {
       title,
       body,
       type,
       data,
+    });
+    socketService.emitToUser(userId, "notification:badge", {
+      count: unreadCount,
     });
 
     // If Firebase is not initialized, just save to history
@@ -334,7 +344,7 @@ export const sendPushNotification = async (
       apns: {
         payload: {
           aps: {
-            badge: 1,
+            badge: unreadCount,
             sound: "default",
           },
         },
