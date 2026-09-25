@@ -73,9 +73,10 @@ app.use('/auth/login', authLimiter);
 app.use('/auth/register', authLimiter);
 app.use('/auth/social', authLimiter);
 app.use('/auth/link-account', authLimiter);
+// Only throttle *sending* email — never the verify click itself, or a
+// valid inbox link can fail with "too many email requests".
 app.use('/auth/forgot-password', emailActionLimiter);
 app.use('/auth/resend-verification', emailActionLimiter);
-app.use('/auth/verify-email', emailActionLimiter);
 app.use(authRoutes);
 app.use(userRoutes);
 app.use(friendRoutes);
