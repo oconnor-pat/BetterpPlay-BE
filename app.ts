@@ -22,6 +22,11 @@ import blockRoutes from "./routes/blocks";
 import reportRoutes from "./routes/reports";
 import playerRatingRoutes from "./routes/playerRatings";
 import venueRoutes from "./routes/venues";
+import {
+  authLimiter,
+  emailActionLimiter,
+  globalLimiter,
+} from "./middleware/rateLimit";
 
 const app: Application = express();
 const httpServer = createServer(app);
@@ -44,6 +49,7 @@ app.use(
     extended: true,
   }),
 );
+app.use(globalLimiter);
 
 app.use(async (req: Request, res: Response, next: Function) => {
   if (req.headers.authorization) {
@@ -63,6 +69,13 @@ app.use("/api/notifications", notificationRoutes);
 // Rating routes before /events so /ratings/pending isn't captured by /:id
 app.use("/events", eventRatingRoutes);
 app.use("/events", eventRoutes);
+app.use('/auth/login', authLimiter);
+app.use('/auth/register', authLimiter);
+app.use('/auth/social', authLimiter);
+app.use('/auth/link-account', authLimiter);
+app.use('/auth/forgot-password', emailActionLimiter);
+app.use('/auth/resend-verification', emailActionLimiter);
+app.use('/auth/verify-email', emailActionLimiter);
 app.use(authRoutes);
 app.use(userRoutes);
 app.use(friendRoutes);

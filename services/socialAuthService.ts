@@ -201,6 +201,7 @@ export async function findOrCreateSocialUser(
         providers.add("password");
       }
       byEmail.authProviders = [...providers];
+      byEmail.emailVerified = true;
       await byEmail.save();
       return { user: byEmail, isNew: false };
     }
@@ -228,6 +229,7 @@ export async function findOrCreateSocialUser(
     password: undefined,
     [field]: identity.providerUserId,
     authProviders: [identity.provider],
+    emailVerified: true,
   });
 
   return { user, isNew: true };

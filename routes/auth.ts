@@ -6,6 +6,18 @@ import nodemailer from "nodemailer";
 import User from "../models/user";
 import Event from "../models/event";
 import communityNote from "../models/communityNote";
+import Block from "../models/block";
+import Conversation from "../models/conversation";
+import DirectMessage from "../models/directMessage";
+import DeviceToken from "../models/deviceToken";
+import Group from "../models/group";
+import GroupMessage from "../models/groupMessage";
+import GroupRead from "../models/groupRead";
+import Notification from "../models/notification";
+import NotificationPreferences from "../models/notificationPreferences";
+import PlayerRating from "../models/playerRating";
+import EventRating from "../models/eventRating";
+import Report from "../models/report";
 import {
   findOrCreateSocialUser,
   SocialProvider,
@@ -16,6 +28,46 @@ const router = Router();
 
 function getJwtSecret(): string {
   return process.env.JWT_SECRET!;
+}
+
+function createMailTransporter() {
+  return nodemailer.createTransport({
+    service: process.env.EMAIL_SERVICE || "gmail",
+    auth: {
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASSWORD,
+    },
+  });
+}
+
+function appBaseUrl(req: Request): string {
+  return process.env.APP_URL || `${req.protocol}://${req.get("host")}`;
+}
+
+async function sendEmailVerificationMail(
+  req: Request,
+  userId: string,
+  email: string,
+): Promise<void> {
+  const verifyToken = jwt.sign(
+    { id: userId, purpose: "email-verify" },
+    getJwtSecret(),
+    { expiresIn: "48h" },
+  );
+  const verifyLink = `${appBaseUrl(req)}/verify-email?token=${verifyToken}`;
+  const transporter = createMailTransporter();
+  await transporter.sendMail({
+    from: process.env.EMAIL_USER,
+    to: email,
+    subject: "BetterPlay - Verify your email",
+    html: `
+      <h2>Verify your email</h2>
+      <p>Thanks for joining BetterPlay. Confirm your email to keep your account secure:</p>
+      <a href="${verifyLink}" style="display: inline-block; padding: 12px 24px; background-color: #10B981; color: white; text-decoration: none; border-radius: 6px;">Verify email</a>
+      <p>This link expires in 48 hours.</p>
+      <p>If you didn't create a BetterPlay account, you can ignore this email.</p>
+    `,
+  });
 }
 
 function deleteS3Object(bucket: string, key: string): Promise<void> {
@@ -99,13 +151,26 @@ router.post(
         username,
         password: hashedPassword,
         authProviders: ["password"],
+        emailVerified: false,
       });
+
+      try {
+        await sendEmailVerificationMail(req, String(newUser._id), normalizedEmail);
+      } catch (mailError) {
+        console.error("Failed to send verification email:", mailError);
+        // Account still created — user can resend from Settings.
+      }
 
       const token = jwt.sign(
         { id: newUser._id, tokenVersion: newUser.tokenVersion },
         getJwtSecret(),
       );
-      return res.status(201).json({ success: true, user: newUser, token });
+      return res.status(201).json({
+        success: true,
+        user: newUser,
+        token,
+        needsEmailVerification: true,
+      });
     } catch (error) {
       console.error("Error in /auth/register:", error);
       res
@@ -504,16 +569,9 @@ router.post("/auth/forgot-password", async (req: Request, res: Response) => {
       { expiresIn: "1h" },
     );
 
-    const transporter = nodemailer.createTransport({
-      service: process.env.EMAIL_SERVICE || "gmail",
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASSWORD,
-      },
-    });
+    const transporter = createMailTransporter();
 
-    const baseUrl =
-      process.env.APP_URL || `${req.protocol}://${req.get("host")}`;
+    const baseUrl = appBaseUrl(req);
     const resetLink = `${baseUrl}/reset-password?token=${resetToken}`;
 
     await transporter.sendMail({
@@ -779,6 +837,129 @@ router.get("/auth/user-data", async (req: Request, res: Response) => {
   }
 });
 
+router.get("/verify-email", (req: Request, res: Response) => {
+  const { token } = req.query;
+  const deepLink = `betterplay://verify-email?token=${token}`;
+
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Verify Email - BetterPlay</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <style>
+        body { font-family: -apple-system, sans-serif; text-align: center; padding: 50px 20px; background: #0b1f14; color: #fff; }
+        .btn { display: inline-block; padding: 14px 28px; background: #10B981; color: #fff; text-decoration: none; border-radius: 8px; font-size: 17px; font-weight: 600; margin-top: 20px; }
+        p { color: #aaa; margin-top: 16px; }
+      </style>
+    </head>
+    <body>
+      <h2>Verify your email</h2>
+      <p>Tap the button below to open BetterPlay and confirm your email.</p>
+      <a href="${deepLink}" class="btn">Open BetterPlay</a>
+      <p style="font-size: 13px; margin-top: 30px;">If the app doesn't open, make sure BetterPlay is installed.</p>
+      <script>window.location.href = "${deepLink}";</script>
+    </body>
+    </html>
+  `);
+});
+
+router.post("/auth/verify-email", async (req: Request, res: Response) => {
+  try {
+    const { token } = req.body;
+    if (!token || typeof token !== "string") {
+      return res
+        .status(400)
+        .json({ success: false, message: "Verification token is required" });
+    }
+
+    const decoded = jwt.verify(token, getJwtSecret()) as {
+      id: string;
+      purpose?: string;
+    };
+    if (decoded.purpose !== "email-verify") {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid verification token" });
+    }
+
+    const user = await User.findById(decoded.id);
+    if (!user) {
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
+    }
+
+    user.emailVerified = true;
+    await user.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Email verified successfully",
+      user,
+    });
+  } catch (error) {
+    console.error("Error verifying email:", error);
+    if (error instanceof jwt.JsonWebTokenError) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid or expired verification link",
+      });
+    }
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to verify email" });
+  }
+});
+
+router.post(
+  "/auth/resend-verification",
+  async (req: Request, res: Response) => {
+    try {
+      const authUser = (req as any).user;
+      if (!authUser?.id) {
+        return res
+          .status(401)
+          .json({ success: false, message: "Authentication required" });
+      }
+
+      const user = await User.findById(authUser.id);
+      if (!user) {
+        return res
+          .status(404)
+          .json({ success: false, message: "User not found" });
+      }
+
+      if (user.emailVerified) {
+        return res.status(200).json({
+          success: true,
+          message: "Email is already verified",
+          alreadyVerified: true,
+        });
+      }
+
+      if (!user.email) {
+        return res.status(400).json({
+          success: false,
+          message: "No email on this account to verify",
+        });
+      }
+
+      await sendEmailVerificationMail(req, String(user._id), user.email);
+      return res.status(200).json({
+        success: true,
+        message: "Verification email sent",
+      });
+    } catch (error) {
+      console.error("Error resending verification:", error);
+      return res.status(500).json({
+        success: false,
+        message: "Failed to send verification email",
+      });
+    }
+  },
+);
+
 router.delete("/auth/delete-account", async (req: Request, res: Response) => {
   try {
     const authHeader = req.headers.authorization;
@@ -842,28 +1023,72 @@ router.delete("/auth/delete-account", async (req: Request, res: Response) => {
       }
     }
 
+    // --- Events created by the user ---
     await Event.deleteMany({ createdBy: userId });
 
+    // --- Remove from other events (roster / waitlist / RSVPs / invites) ---
+    const rosterEvents = await Event.find({
+      $or: [{ "roster.userId": userId }, { "roster.username": username }],
+    });
+    for (const event of rosterEvents) {
+      const before = (event.roster || []).length;
+      event.roster = (event.roster || []).filter(
+        (p: any) => p.userId !== userId && p.username !== username,
+      );
+      const removed = before - event.roster.length;
+      if (removed > 0) {
+        event.rosterSpotsFilled = Math.max(
+          0,
+          (event.rosterSpotsFilled || before) - removed,
+        );
+        await event.save();
+      }
+    }
+
     await Event.updateMany(
-      { "roster.username": username },
       {
-        $pull: { roster: { username: username } },
-        $inc: { rosterSpotsFilled: -1 },
+        $or: [
+          { "waitlist.userId": userId },
+          { "rsvps.userId": userId },
+          { "joinRequests.userId": userId },
+          { "guestAddRequests.requestedBy": userId },
+          { "guestAddRequests.proposedUserId": userId },
+          { "spotReservations.userId": userId },
+          { "reactions.userId": userId },
+          { likes: userId },
+          { invitedUsers: userId },
+          { removedUserIds: userId },
+        ],
+      },
+      {
+        $pull: {
+          waitlist: { userId },
+          rsvps: { userId },
+          joinRequests: { userId },
+          guestAddRequests: { requestedBy: userId },
+          spotReservations: { userId },
+          reactions: { userId },
+          likes: userId,
+          invitedUsers: userId,
+          removedUserIds: userId,
+        },
       },
     );
+    await Event.updateMany(
+      { "guestAddRequests.proposedUserId": userId },
+      { $pull: { guestAddRequests: { proposedUserId: userId } } },
+    );
 
-    await communityNote.deleteMany({ userId: userId });
-
+    // --- Community notes / comments / likes ---
+    await communityNote.deleteMany({ userId });
     await communityNote.updateMany(
       { "comments.userId": userId },
-      { $pull: { comments: { userId: userId } } },
+      { $pull: { comments: { userId } } },
     );
-
     await communityNote.updateMany(
       { "comments.replies.userId": userId },
-      { $pull: { "comments.$[].replies": { userId: userId } } },
+      { $pull: { "comments.$[].replies": { userId } } },
     );
-
     await communityNote.updateMany(
       { likes: userId },
       { $pull: { likes: userId } },
@@ -876,6 +1101,87 @@ router.delete("/auth/delete-account", async (req: Request, res: Response) => {
       { "comments.replies.likes": userId },
       { $pull: { "comments.$[].replies.$[].likes": userId } },
     );
+
+    // --- Direct messages ---
+    const dmConversations = await Conversation.find({
+      participants: userId,
+    })
+      .select("_id")
+      .lean();
+    const dmIds = dmConversations.map((c) => String(c._id));
+    if (dmIds.length > 0) {
+      await DirectMessage.deleteMany({ conversationId: { $in: dmIds } });
+      await Conversation.deleteMany({ _id: { $in: dmIds } });
+    }
+
+    // --- Groups: leave, transfer ownership, or delete empty groups ---
+    const memberGroups = await Group.find({ "members.userId": userId });
+    for (const group of memberGroups) {
+      const others = (group.members || []).filter((m) => m.userId !== userId);
+      if (others.length === 0) {
+        const gid = String(group._id);
+        await GroupMessage.deleteMany({ groupId: gid });
+        await GroupRead.deleteMany({ groupId: gid });
+        await Group.deleteOne({ _id: group._id });
+        continue;
+      }
+
+      group.members = others;
+      if (group.createdBy === userId) {
+        const nextOwner =
+          others.find((m) => m.role === "admin") || others[0];
+        group.createdBy = nextOwner.userId;
+        group.members = others.map((m) => ({
+          userId: m.userId,
+          role: (m.userId === nextOwner.userId ? "admin" : m.role) as
+            | "admin"
+            | "member",
+          joinedAt: m.joinedAt,
+        }));
+      }
+      await group.save();
+    }
+    await GroupRead.deleteMany({ userId });
+    await GroupMessage.updateMany(
+      { "reactions.userId": userId },
+      { $pull: { reactions: { userId } } },
+    );
+
+    // --- Social graph ---
+    await User.updateMany(
+      {
+        $or: [
+          { friends: user._id },
+          { friendRequestsSent: user._id },
+          { friendRequestsReceived: user._id },
+        ],
+      },
+      {
+        $pull: {
+          friends: user._id,
+          friendRequestsSent: user._id,
+          friendRequestsReceived: user._id,
+        },
+      },
+    );
+    await Block.deleteMany({
+      $or: [{ blockerId: userId }, { blockedId: userId }],
+    });
+
+    // --- Ratings, notifications, devices ---
+    await PlayerRating.deleteMany({
+      $or: [{ raterId: userId }, { rateeId: userId }],
+    });
+    await EventRating.deleteMany({
+      $or: [{ raterId: userId }, { hostId: userId }],
+    });
+    await Notification.deleteMany({ userId: user._id });
+    await NotificationPreferences.deleteMany({ userId: user._id });
+    await DeviceToken.deleteMany({ userId: user._id });
+
+    // Reports filed *by* the user can go; reports *about* them are kept
+    // for moderation / safety history with the reporter still intact.
+    await Report.deleteMany({ reporterId: userId });
 
     await User.findByIdAndDelete(userId);
 

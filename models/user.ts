@@ -37,6 +37,11 @@ export interface IUser extends Document {
     coordinates: [number, number];
   } | null;
   proximityVisibility: "public" | "friends" | "private";
+  /**
+   * Password signups start unverified until they confirm via email.
+   * Social (Apple/Google) and legacy accounts are treated as verified.
+   */
+  emailVerified: boolean;
 }
 
 const UserSchema: Schema = new Schema(
@@ -85,6 +90,9 @@ const UserSchema: Schema = new Schema(
       enum: ["public", "friends", "private"],
       default: "private",
     },
+    // Default true so existing accounts stay verified; password register
+    // explicitly sets false and sends a confirmation email.
+    emailVerified: { type: Boolean, default: true },
   },
   { timestamps: true },
 );
