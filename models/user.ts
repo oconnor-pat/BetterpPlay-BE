@@ -8,6 +8,10 @@ export interface IManagedVenue {
   address?: string;
   latitude?: number;
   longitude?: number;
+  /** Personal accounts invited as staff who can post as this venue. */
+  adminUserIds?: mongoose.Types.ObjectId[];
+  /** Invites waiting for the staff member to accept. */
+  pendingAdminUserIds?: mongoose.Types.ObjectId[];
 }
 
 export interface IUser extends Document {
@@ -69,6 +73,14 @@ const UserSchema: Schema = new Schema(
         address: { type: String, required: false },
         latitude: { type: Number, required: false },
         longitude: { type: Number, required: false },
+        adminUserIds: {
+          type: [{ type: Schema.Types.ObjectId, ref: "Users" }],
+          default: [],
+        },
+        pendingAdminUserIds: {
+          type: [{ type: Schema.Types.ObjectId, ref: "Users" }],
+          default: [],
+        },
       },
       required: false,
       default: null,

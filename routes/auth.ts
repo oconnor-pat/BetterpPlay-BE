@@ -23,12 +23,10 @@ import {
   SocialProvider,
   verifySocialIdToken,
 } from "../services/socialAuthService";
+import { toPublicUser } from "../utils/publicUser";
+import { getJwtSecret, signSessionToken } from "../utils/sessionToken";
 
 const router = Router();
-
-function getJwtSecret(): string {
-  return process.env.JWT_SECRET!;
-}
 
 function createMailTransporter() {
   return nodemailer.createTransport({
@@ -161,13 +159,10 @@ router.post(
         // Account still created — user can resend from Settings.
       }
 
-      const token = jwt.sign(
-        { id: newUser._id, tokenVersion: newUser.tokenVersion },
-        getJwtSecret(),
-      );
+      const token = signSessionToken(newUser);
       return res.status(201).json({
         success: true,
-        user: newUser,
+        user: toPublicUser(newUser),
         token,
         needsEmailVerification: true,
       });
@@ -201,11 +196,10 @@ router.post("/auth/login", async (req: Request, res: Response) => {
       return res.status(401).json({ message: "Incorrect password" });
     }
 
-    const token = jwt.sign(
-      { id: user._id, tokenVersion: user.tokenVersion },
-      getJwtSecret(),
-    );
-    return res.status(200).json({ success: true, user, token });
+    const token = signSessionToken(user);
+    return res
+      .status(200)
+      .json({ success: true, user: toPublicUser(user), token });
   } catch (error) {
     return res
       .status(500)
@@ -248,10 +242,7 @@ router.post("/auth/social", async (req: Request, res: Response) => {
     );
     const { user, isNew } = await findOrCreateSocialUser(identity, name);
 
-    const token = jwt.sign(
-      { id: user._id, tokenVersion: user.tokenVersion },
-      getJwtSecret(),
-    );
+    const token = signSessionToken(user);
 
     const isPrivateRelay = /@privaterelay\.appleid\.com$/i.test(
       user.email || "",
@@ -262,7 +253,7 @@ router.post("/auth/social", async (req: Request, res: Response) => {
       isNew,
       suggestLink: isNew,
       isPrivateRelay,
-      user,
+      user: toPublicUser(user),
       token,
     });
   } catch (error: any) {
@@ -406,15 +397,12 @@ router.post("/auth/link-account", async (req: Request, res: Response) => {
     await orphan.save();
     await User.deleteOne({ _id: orphan._id });
 
-    const newToken = jwt.sign(
-      { id: target._id, tokenVersion: target.tokenVersion },
-      getJwtSecret(),
-    );
+    const newToken = signSessionToken(target);
 
     return res.status(200).json({
       success: true,
       message: "Accounts linked successfully",
-      user: target,
+      user: toPublicUser(target),
       token: newToken,
     });
   } catch (error) {
@@ -526,10 +514,7 @@ router.put("/auth/change-password", async (req: Request, res: Response) => {
     user.tokenVersion = (user.tokenVersion || 0) + 1;
     await user.save();
 
-    const newToken = jwt.sign(
-      { id: user._id, tokenVersion: user.tokenVersion },
-      getJwtSecret(),
-    );
+    const newToken = signSessionToken(user);
 
     return res.status(200).json({
       success: true,

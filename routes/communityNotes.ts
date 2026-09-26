@@ -42,7 +42,7 @@ const syncLikesFromReactions = (doc: any) => {
 };
 
 const resolveActorId = (req: Request): string | null => {
-  if (req.body?.userId) return String(req.body.userId);
+  // Always prefer JWT identity — never trust client-supplied userId.
   const user = (req as any).user;
   if (user?.id) return String(user.id);
   return null;

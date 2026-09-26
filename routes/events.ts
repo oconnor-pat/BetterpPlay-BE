@@ -784,6 +784,13 @@ router.get("/:id", async (req: Request, res: Response) => {
 
 router.post("/", async (req: Request, res: Response) => {
   try {
+    const actorId = (req as any).user?.id
+      ? String((req as any).user.id)
+      : null;
+    if (!actorId) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+
     const {
       name,
       location,
@@ -792,7 +799,6 @@ router.post("/", async (req: Request, res: Response) => {
       date,
       totalSpots,
       eventType,
-      createdBy,
       createdByUsername,
       latitude,
       longitude,
@@ -814,7 +820,23 @@ router.post("/", async (req: Request, res: Response) => {
       sourceUrl,
       trackPayment,
       creatorRoster,
+      // Staff posting as a venue brand account (must be owner or listed admin).
+      asVenueUserId,
     } = req.body;
+
+    // Always bind creator to JWT. Optional asVenueUserId lets venue staff
+    // stamp the brand account as createdBy after membership check.
+    let createdBy = actorId;
+    if (asVenueUserId && String(asVenueUserId) !== actorId) {
+      const { canActAsVenue } = await import("../utils/venueAccess.js");
+      const allowed = await canActAsVenue(actorId, String(asVenueUserId));
+      if (!allowed) {
+        return res.status(403).json({
+          message: "Not allowed to post as that venue",
+        });
+      }
+      createdBy = String(asVenueUserId);
+    }
 
     if (
       !name ||
@@ -824,8 +846,7 @@ router.post("/", async (req: Request, res: Response) => {
       totalSpots === undefined ||
       totalSpots === null ||
       totalSpots === "" ||
-      !eventType ||
-      !createdBy
+      !eventType
     ) {
       return res.status(400).json({ message: "Missing required fields" });
     }
@@ -1301,6 +1322,13 @@ router.post("/", async (req: Request, res: Response) => {
 
 router.put("/:id", async (req: Request, res: Response) => {
   try {
+    const actorId = (req as any).user?.id
+      ? String((req as any).user.id)
+      : null;
+    if (!actorId) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+
     const eventId = req.params.id;
     const {
       name,
@@ -1330,6 +1358,14 @@ router.put("/:id", async (req: Request, res: Response) => {
     const event = await Event.findById(eventId);
     if (!event) {
       return res.status(404).json({ message: "Event not found" });
+    }
+
+    const { canActAsVenue } = await import("../utils/venueAccess.js");
+    const isOwner = String(event.createdBy) === actorId;
+    const isVenueStaff =
+      !isOwner && (await canActAsVenue(actorId, String(event.createdBy)));
+    if (!isOwner && !isVenueStaff) {
+      return res.status(403).json({ message: "Not allowed to edit this event" });
     }
 
     const oldValues: Record<string, any> = {
@@ -1832,9 +1868,6 @@ router.put("/:id", async (req: Request, res: Response) => {
       }
     }
 
-    const actorId = (req as any).user?.id
-      ? String((req as any).user.id)
-      : null;
     const affectedDocs = await Event.find({
       _id: { $in: Array.from(affectedEventIds) },
     }).select("roster invitedUsers waitlist name date time");
@@ -2297,13 +2330,18 @@ router.delete(
           String(actor.username).toLowerCase() ===
             String(username).toLowerCase());
       const isCreator = String(event.createdBy) === actorId;
-      if (!isSelf && !isCreator) {
+      let isVenueStaff = false;
+      if (!isCreator && !isSelf) {
+        const { canActAsVenue } = await import("../utils/venueAccess.js");
+        isVenueStaff = await canActAsVenue(actorId, String(event.createdBy));
+      }
+      if (!isSelf && !isCreator && !isVenueStaff) {
         return res.status(403).json({
           message: "Only the host can remove other players from this event",
         });
       }
       // Host leaving their own event uses the self path; don't "boot" yourself.
-      const isBoot = isCreator && !isSelf;
+      const isBoot = (isCreator || isVenueStaff) && !isSelf;
 
       const wasFull = isRosterFull(event);
       event.roster = event.roster.filter((p: any) => p.username !== username);
@@ -3168,9 +3206,16 @@ router.delete(
       }
 
       if (String(sample.createdBy) !== currentUser.id) {
-        return res
-          .status(403)
-          .json({ message: "Only the event creator can delete the series" });
+        const { canActAsVenue } = await import("../utils/venueAccess.js");
+        const allowed = await canActAsVenue(
+          String(currentUser.id),
+          String(sample.createdBy),
+        );
+        if (!allowed) {
+          return res
+            .status(403)
+            .json({ message: "Only the event creator can delete the series" });
+        }
       }
 
       const result = await Event.deleteMany({
@@ -3211,9 +3256,16 @@ router.delete("/:id", async (req: Request, res: Response) => {
     // could DELETE it (the FE already sends an auth header so this
     // check doesn't break the existing client flow).
     if (String(event.createdBy) !== String(currentUser.id)) {
-      return res
-        .status(403)
-        .json({ message: "Only the event creator can delete this event" });
+      const { canActAsVenue } = await import("../utils/venueAccess.js");
+      const allowed = await canActAsVenue(
+        String(currentUser.id),
+        String(event.createdBy),
+      );
+      if (!allowed) {
+        return res
+          .status(403)
+          .json({ message: "Only the event creator can delete this event" });
+      }
     }
     const groupId = event.recurrenceGroupId
       ? String(event.recurrenceGroupId)
@@ -3518,16 +3570,10 @@ const handleReactionToggle = async (
   res: Response,
   requestedEmoji: unknown,
 ) => {
-  let userId = req.body.userId;
-  if (!userId) {
-    const user = (req as any).user;
-    if (user && user.id) {
-      userId = user.id;
-    }
-  }
+  let userId = (req as any).user?.id ? String((req as any).user.id) : null;
 
   if (!userId) {
-    return res.status(400).json({ message: "Missing userId." });
+    return res.status(401).json({ message: "Authentication required" });
   }
 
   if (!isValidEmoji(requestedEmoji)) {
