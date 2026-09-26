@@ -11,6 +11,7 @@ import blockService from "../services/blockService";
 import { isValidEmoji } from "../utils/emoji";
 import { resolveEventStartsAt } from "../utils/eventDateTime";
 import { normalizeRosterForEventShape, resolveJoinParticipantFields } from "../utils/rosterNormalize";
+import { canActAsVenue } from "../utils/venueAccess";
 import Notification from "../models/notification";
 
 const router = Router();
@@ -828,7 +829,6 @@ router.post("/", async (req: Request, res: Response) => {
     // stamp the brand account as createdBy after membership check.
     let createdBy = actorId;
     if (asVenueUserId && String(asVenueUserId) !== actorId) {
-      const { canActAsVenue } = await import("../utils/venueAccess.js");
       const allowed = await canActAsVenue(actorId, String(asVenueUserId));
       if (!allowed) {
         return res.status(403).json({
@@ -1360,7 +1360,6 @@ router.put("/:id", async (req: Request, res: Response) => {
       return res.status(404).json({ message: "Event not found" });
     }
 
-    const { canActAsVenue } = await import("../utils/venueAccess.js");
     const isOwner = String(event.createdBy) === actorId;
     const isVenueStaff =
       !isOwner && (await canActAsVenue(actorId, String(event.createdBy)));
@@ -2332,7 +2331,6 @@ router.delete(
       const isCreator = String(event.createdBy) === actorId;
       let isVenueStaff = false;
       if (!isCreator && !isSelf) {
-        const { canActAsVenue } = await import("../utils/venueAccess.js");
         isVenueStaff = await canActAsVenue(actorId, String(event.createdBy));
       }
       if (!isSelf && !isCreator && !isVenueStaff) {
@@ -3206,7 +3204,6 @@ router.delete(
       }
 
       if (String(sample.createdBy) !== currentUser.id) {
-        const { canActAsVenue } = await import("../utils/venueAccess.js");
         const allowed = await canActAsVenue(
           String(currentUser.id),
           String(sample.createdBy),
@@ -3256,7 +3253,6 @@ router.delete("/:id", async (req: Request, res: Response) => {
     // could DELETE it (the FE already sends an auth header so this
     // check doesn't break the existing client flow).
     if (String(event.createdBy) !== String(currentUser.id)) {
-      const { canActAsVenue } = await import("../utils/venueAccess.js");
       const allowed = await canActAsVenue(
         String(currentUser.id),
         String(event.createdBy),
